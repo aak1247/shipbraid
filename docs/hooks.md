@@ -99,3 +99,5 @@ AutoTask 的 `pnpm deploy:local` 通过 HTTP 提交并等待，具体 worker 在
 首次安装从开发部署 checkout 的实际提交初始化受信发布线；后续本机客户端仅快进更新固定镜像引用。共享分支与当前开发环境分叉时，需先合并历史，不能让协调入口偷偷覆盖其他会话的发布。
 
 升级安装器拒绝覆盖仍 active 的协调器。先 drain，等活动任务结算并核对所有权，再停止服务、安装新 release。停止协调器不会停止独立执行的发布任务。
+
+Dashboard 的独立静态资源发布目录为 `~/.local/share/auto-deliver/dashboard-releases/<commit>-<digest>/web`。仅前端更新时，构建 `web/dist`，复制到新的不可变目录，切换私有配置中的 `dashboard_dir` 后重启协调器；执行器路径、lane 配置和 profile 指纹保持原值，启动后核对现有任务所有权。完整程序/执行器升级仍遵循上面的排空流程。宽详情与 tail 日志的浏览器及发布证据见 [dashboard-tail-20261016.json](acceptance/dashboard-tail-20261016.json)。

@@ -1,0 +1,78 @@
+{
+  "observed_at": "2026-10-16T12:42:24.381639+00:00",
+  "scope": "Dashboard wide execution inspector and terminal tail",
+  "checks": {
+    "frontend_typecheck": true,
+    "frontend_tests": 10,
+    "production_build": true,
+    "layout_detector_findings": 0,
+    "run_defaults_to_logs": true,
+    "follow_appended_logs_to_bottom": true,
+    "scroll_up_pauses_follow": true,
+    "paused_viewport_and_visible_window_preserved": true,
+    "incoming_log_badge_while_paused": true,
+    "resume_shows_new_line_at_bottom": true,
+    "reopen_resets_following": true,
+    "close_restores_record_focus": true,
+    "escape_closes": true,
+    "wrap_toggle": true,
+    "related_navigation_resets_incompatible_filters": true,
+    "related_navigation_restores_target_focus": true,
+    "post_publish_lan_browser_smoke": true,
+    "post_publish_default_logs": true,
+    "post_publish_inspector_width": 1080,
+    "post_publish_bearer_auth_401_without_token": true,
+    "browser_stores_no_token": true,
+    "independent_source_review": "PASS after related-navigation fix"
+  },
+  "log_append_test": {
+    "kind": "browser-only intercepted GET fixture",
+    "marker": "TAIL_INTERACTION_FIXTURE",
+    "server_mutations": 0,
+    "route_removed_after_test": true
+  },
+  "viewports": {
+    "desktop": {
+      "width": 1440,
+      "document_width": 1440,
+      "inspector_width": 1080
+    },
+    "tablet": {
+      "width": 980,
+      "inspector_width": 804,
+      "left": 176
+    },
+    "mobile": {
+      "width": 390,
+      "document_width": 390,
+      "terminal_height": 355,
+      "terminal_bottom": 714,
+      "viewport_height": 844,
+      "wrap_default": true,
+      "at_bottom": true
+    },
+    "short_window": {
+      "width": 390,
+      "height": 500,
+      "body_scrollable": true,
+      "content_height": 632,
+      "body_height": 435
+    }
+  },
+  "screenshots": [
+    ".impeccable/review/auto-deliver-tail-desktop.png",
+    ".impeccable/review/auto-deliver-tail-mobile.png"
+  ],
+  "deployment": {
+    "observed_at": "2026-10-16T12:45:49.765236+00:00",
+    "url": "http://172.168.3.70:8787",
+    "source_commit": "ebef028c3663e1ff103bf184b3d11062acd94063",
+    "release": "/home/yahui/.local/share/auto-deliver/dashboard-releases/ebef028c3663-53685d921f22",
+    "content_sha256": "53685d921f22277f781438b7685a64ebc6a1f576c74d17edb8df178bfa63dfae",
+    "dashboard_html_matches_build": true,
+    "coordinator_ready": true,
+    "executor_profile_and_lane_ownership_preserved": true,
+    "new_deployment_jobs_created": 0,
+    "existing_active_run_state": "unknown"
+  }
+}
