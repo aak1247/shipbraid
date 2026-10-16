@@ -257,6 +257,16 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(reply['status'], 'unknown')
         self.assertNotIn('failure_proof', reply)
 
+    def test_missing_cgroup_property_cannot_mean_destroyed_cgroup(self):
+        for value in (None, False, 0, 'missing'):
+            with self.subTest(value=value):
+                state = self.failed_unit_state(ControlGroup=value)
+                if value == 'missing':
+                    state.pop('ControlGroup')
+                reply = self.observe_failure(self.failed_result(), state)
+                self.assertEqual(reply['status'], 'unknown')
+                self.assertNotIn('failure_proof', reply)
+
     def test_failure_result_identity_mismatch_never_gets_proof(self):
         state = self.failed_unit_state()
         mismatches = [

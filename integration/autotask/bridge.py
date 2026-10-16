@@ -263,7 +263,8 @@ def failure_proof(recorded, result, run, target, unit, first_state, request_path
                 or state.get('InvocationID') != invocation_id
                 or state.get('LoadState') != 'loaded'
                 or state.get('ActiveState') not in ('inactive', 'failed')
-                or state.get('MainPID') != '0'):
+                or state.get('MainPID') != '0'
+                or not isinstance(state.get('ControlGroup'), str)):
             raise RuntimeError('systemd has not proven this failed job is stopped')
         try:
             status = int(state.get('ExecMainStatus', ''))
@@ -273,7 +274,7 @@ def failure_proof(recorded, result, run, target, unit, first_state, request_path
             raise RuntimeError('systemd exit status does not match the durable failure')
 
     validate_supervisor(first_state)
-    process_check = cgroup_process_check(first_state.get('ControlGroup', ''))
+    process_check = cgroup_process_check(first_state['ControlGroup'])
     second_state = unit_state(unit)
     validate_supervisor(second_state)
     if any(first_state.get(key) != second_state.get(key) for key in UNIT_FENCE_FIELDS):
