@@ -82,6 +82,10 @@ pub struct LaneConfig {
     pub enabled: bool,
     #[serde(default)]
     pub executor: LaneExecutorConfig,
+    /// Read-only, failure-only reconciliation. Never dispatches or verifies a
+    /// deployment, so it does not replace the frozen execution profile.
+    #[serde(default)]
+    pub failure_observe: Option<HookConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -178,7 +182,10 @@ impl Config {
                 verify,
             } = &mut lane.executor
             {
-                for hook in [dispatch, observe, verify] {
+                for hook in [dispatch, observe, verify]
+                    .into_iter()
+                    .chain(lane.failure_observe.iter_mut())
+                {
                     match hook {
                         HookConfig::Command { program, cwd, .. } => {
                             resolve_program(base, program);
@@ -249,6 +256,12 @@ impl Config {
             }
             if lane.executor.kind() == "hooks" && lane.allow_preemption {
                 bail!("hook lane {} must disable preemption", lane.id);
+            }
+            if let Some(hook) = &lane.failure_observe {
+                if lane.executor.kind() != "hooks" {
+                    bail!("failure observer requires a hooks lane: {}", lane.id);
+                }
+                validate_hook(&lane.id, "failure_observe", hook)?;
             }
             if let Some((dispatch, observe, verify)) = lane.executor.hooks() {
                 for (name, hook) in [
@@ -504,6 +517,18 @@ mod tests {
         };
         let config = Config::default();
         let first = config.effective_profile_digest(&lane).unwrap();
+        lane.failure_observe = Some(HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1_000,
+        });
+        assert_eq!(
+            first,
+            config.effective_profile_digest(&lane).unwrap(),
+            "failure-only observation cannot change the frozen dispatch profile"
+        );
+
         let LaneExecutorConfig::Hooks { dispatch, .. } = &mut lane.executor else {
             unreachable!()
         };

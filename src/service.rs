@@ -1502,6 +1502,7 @@ impl Service {
                     .await?;
                 }
             }
+            self.observe_failed_stop(&current).await?;
         }
         Ok(())
     }
@@ -1753,7 +1754,28 @@ impl Service {
                     }
                 }
                 HookStatus::Failed => {
-                    if operation == HookOperation::Verify {
+                    if reply.failure_proof.is_some() {
+                        let evidence = serde_json::to_string(&serde_json::json!({
+                            "run_id": reply.run_id, "generation": reply.generation,
+                            "executor_ref": reply.executor_ref, "proof": reply.failure_proof,
+                        }))
+                        .map_err(|_| ServiceError::UnprovenExecutorState)?;
+                        engine.confirm_failed_proven(
+                            state,
+                            run.id,
+                            run.generation,
+                            &executor_ref,
+                            &evidence,
+                            &bounded_text(
+                                reply
+                                    .message
+                                    .as_deref()
+                                    .unwrap_or("executor stopped after failure"),
+                                1024,
+                            ),
+                            now,
+                        )?;
+                    } else if operation == HookOperation::Verify {
                         if let Some(command) = command {
                             engine.command_delivery(
                                 state,
@@ -1876,24 +1898,26 @@ impl Service {
                     }
                 }
             }
-            if let Some(message) = reply
-                .message
-                .as_deref()
-                .filter(|message| !message.is_empty())
-            {
-                let level = if reply.status == HookStatus::Failed {
+            let message = bounded_text(reply.message.as_deref().unwrap_or(""), 1024);
+            let signature = hex::encode(Sha256::digest(
+                serde_json::to_vec(&serde_json::json!({
+                    "status": reply.status, "executor_ref": reply.executor_ref, "message": message,
+                }))
+                .expect("observation summary serializes"),
+            ));
+            engine.record_hook_observation(
+                state,
+                run.id,
+                &format!("{operation:?}"),
+                &signature,
+                if reply.status == HookStatus::Failed {
                     "error"
                 } else {
                     "info"
-                };
-                let _ = engine.record_executor_log(
-                    state,
-                    run.id,
-                    level,
-                    &bounded_text(message, 1024),
-                    now,
-                );
-            }
+                },
+                &message,
+                now,
+            )?;
             Ok(())
         })
         .await
@@ -1928,7 +1952,15 @@ impl Service {
             {
                 engine.mark_unknown(state, run.id, run.generation, &reason, now)?;
             }
-            let _ = engine.record_executor_log(state, run.id, "warn", &reason, now);
+            engine.record_hook_observation(
+                state,
+                run.id,
+                "transport",
+                &reason,
+                "warn",
+                &reason,
+                now,
+            )?;
             Ok(())
         })
         .await
@@ -1958,6 +1990,60 @@ impl Service {
         Some(self.executor_kind(&run.lane_id))
     }
 
+    async fn observe_failed_stop(
+        &self,
+        run: &crate::domain::DeliveryRun,
+    ) -> Result<bool, ServiceError> {
+        let state = self.snapshot().await;
+        let Some(current) = state.runs.get(&run.id) else {
+            return Ok(false);
+        };
+        if current.state != RunState::Unknown || !self.hook_profile_matches(&state, current) {
+            return Ok(false);
+        }
+        let Some(config) = self
+            .config
+            .lanes
+            .iter()
+            .find(|lane| lane.id == current.lane_id)
+            .and_then(|lane| lane.failure_observe.clone())
+        else {
+            return Ok(false);
+        };
+        let Some(lane) = state.lanes.get(&current.lane_id) else {
+            return Ok(false);
+        };
+        let envelope = HookEnvelope {
+            version: 1,
+            operation: HookOperation::Observe,
+            command: None,
+            run: current,
+            lane,
+        };
+        let Ok(HookCall::Reply(mut reply)) = HookExecutor::call(&config, &envelope).await else {
+            return Ok(false);
+        };
+        if reply.status != HookStatus::Failed || reply.failure_proof.is_none() {
+            return Ok(false);
+        }
+        // Preserve which trusted failure-only observer produced the proof.
+        if let Some(evidence) = reply
+            .failure_proof
+            .as_mut()
+            .and_then(|proof| proof.evidence.as_object_mut())
+        {
+            evidence.insert(
+                "observer_config_sha256".into(),
+                serde_json::json!(hex::encode(Sha256::digest(
+                    serde_json::to_vec(&config).expect("hook config serializes")
+                ))),
+            );
+        }
+        self.apply_hook_reply(HookOperation::Observe, None, current, *reply)
+            .await?;
+        Ok(true)
+    }
+
     async fn resolve_unknown_hook(
         &self,
         snapshot: &State,
@@ -1967,10 +2053,11 @@ impl Service {
         evidence_note: String,
         reason: String,
     ) -> Result<(), ServiceError> {
-        if !self.hook_profile_matches(snapshot, run)
-            || matches!(action, ResolveAction::ConfirmStopped)
-        {
+        if !self.hook_profile_matches(snapshot, run) {
             return Err(ServiceError::UnprovenExecutorState);
+        }
+        if matches!(action, ResolveAction::ConfirmStopped) && self.observe_failed_stop(run).await? {
+            return Ok(());
         }
         let operation = if matches!(action, ResolveAction::RecordVerified) {
             HookOperation::Verify
@@ -1993,6 +2080,14 @@ impl Service {
         else {
             return Err(ServiceError::UnprovenExecutorState);
         };
+        if matches!(action, ResolveAction::ConfirmStopped) {
+            if reply.status != HookStatus::Failed || reply.failure_proof.is_none() {
+                return Err(ServiceError::UnprovenExecutorState);
+            }
+            return self
+                .apply_hook_reply(HookOperation::Observe, None, run, *reply)
+                .await;
+        }
         let proof = match (
             &action,
             reply.status,
@@ -2330,6 +2425,7 @@ mod tests {
                 components: vec!["app".into()],
                 allow_descendant: false,
                 allow_preemption: false,
+                failure_observe: None,
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
             }],
@@ -2416,6 +2512,7 @@ print(json.dumps(reply))
                 components: vec!["app".into()],
                 allow_descendant: false,
                 allow_preemption: false,
+                failure_observe: None,
                 enabled: true,
                 executor: LaneExecutorConfig::Hooks {
                     dispatch: hook.clone(),
@@ -2797,6 +2894,279 @@ print(json.dumps(reply))
         assert_eq!(
             ScriptedExecutor::synthetic_physical_start_count(&restored),
             1
+        );
+    }
+    fn failed_observation(run: &crate::domain::DeliveryRun) -> HookReply {
+        HookReply {
+            version: 1,
+            run_id: run.id,
+            generation: run.generation,
+            executor_ref: run.executor_ref.clone(),
+            status: HookStatus::Failed,
+            message: Some("deployment failed; inspect environment".into()),
+            environment_known_unchanged: Some(false),
+            logs: vec![],
+            receipt: None,
+            failure_proof: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_failed_observations_are_durable_snapshots_not_log_output() {
+        let (_temp, config, service, _) = hook_test_service().await;
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+        let run = service.snapshot().await.runs[&run_id].clone();
+        let mut reply = failed_observation(&run);
+        reply.logs.push(crate::hooks::HookLog {
+            sequence: 1,
+            level: "error".into(),
+            message: "same output".into(),
+        });
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, reply.clone())
+            .await
+            .unwrap();
+        let first = service.snapshot().await;
+        for _ in 0..50 {
+            service
+                .apply_hook_reply(HookOperation::Observe, None, &run, reply.clone())
+                .await
+                .unwrap();
+        }
+        let repeated = service.snapshot().await;
+        assert_eq!(repeated.events, first.events);
+        assert_eq!(
+            repeated.runs[&run_id].updated_at,
+            first.runs[&run_id].updated_at
+        );
+        assert_eq!(repeated.runs[&run_id].state, RunState::Unknown);
+        assert_eq!(repeated.lanes["test-lane"].active_run_id, Some(run_id));
+        drop(service);
+        let service = Service::open(config).await.unwrap();
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, reply.clone())
+            .await
+            .unwrap();
+        assert_eq!(
+            service.snapshot().await.events,
+            first.events,
+            "deduplication survives restart"
+        );
+        reply.logs.push(crate::hooks::HookLog {
+            sequence: 2,
+            level: "error".into(),
+            message: "same output".into(),
+        });
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, reply.clone())
+            .await
+            .unwrap();
+        let output = service.snapshot().await;
+        assert_eq!(
+            output.events.len(),
+            first.events.len() + 1,
+            "new sequence with identical text is real output"
+        );
+        assert!(
+            output
+                .events
+                .last()
+                .unwrap()
+                .message
+                .contains("[hook_seq:2]")
+        );
+        reply.message = Some("different failure detail".into());
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, reply.clone())
+            .await
+            .unwrap();
+        let changed = service.snapshot().await;
+        assert_eq!(
+            changed.events.len(),
+            output.events.len() + 3,
+            "changed reason, marker, summary"
+        );
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, reply)
+            .await
+            .unwrap();
+        assert_eq!(service.snapshot().await.events, changed.events);
+        service
+            .mark_hook_operation_unknown(&run, None, "connection refused")
+            .await
+            .unwrap();
+        let transport = service.snapshot().await;
+        for _ in 0..10 {
+            service
+                .mark_hook_operation_unknown(&run, None, "connection refused")
+                .await
+                .unwrap();
+        }
+        assert_eq!(service.snapshot().await.events, transport.events);
+    }
+
+    fn write_failure_observer(path: &Path, mode: &str) {
+        std::fs::write(path, format!(r#"
+import datetime, json, sys
+request = json.load(sys.stdin)
+run = request['run']
+mode = {mode:?}
+reply = {{'version': 1, 'run_id': run['id'], 'generation': run['generation'],
+         'executor_ref': run['executor_ref'], 'status': 'failed', 'message': 'failed supervisor'}}
+if mode != 'unproven':
+    reply['failure_proof'] = {{'observed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+                             'evidence': {{'supervisor': 'stopped', 'cgroup': 'empty'}}}}
+if mode == 'running':
+    reply['status'] = 'running'
+    reply.pop('failure_proof')
+if mode == 'wrong_generation': reply['generation'] += 1
+if mode == 'wrong_ref': reply['executor_ref'] = 'other-unit'
+if mode == 'stale': reply['failure_proof']['observed_at'] = '2000-01-01T00:00:00Z'
+print(json.dumps(reply))
+"#)).unwrap();
+    }
+
+    #[tokio::test]
+    async fn failure_only_observer_recovers_after_restart_with_explicit_retry_barrier() {
+        let (_temp, mut config, service, marker) = hook_test_service().await;
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+        let run = service.snapshot().await.runs[&run_id].clone();
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, failed_observation(&run))
+            .await
+            .unwrap();
+        let profile = config.effective_profile_digest(&config.lanes[0]).unwrap();
+        let path = marker.with_file_name("failure-observe.py");
+        write_failure_observer(&path, "failed");
+        config.lanes[0].failure_observe = Some(HookConfig::Script {
+            path,
+            interpreter: "python3".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 5_000,
+        });
+        assert_eq!(
+            config.effective_profile_digest(&config.lanes[0]).unwrap(),
+            profile
+        );
+        drop(service);
+        let service = Service::open(config).await.unwrap();
+        assert!(service.observe_failed_stop(&run).await.unwrap());
+        let after = service.snapshot().await;
+        assert_eq!(after.runs[&run_id].state, RunState::Failed);
+        assert!(after.runs[&run_id].receipt_id.is_none());
+        assert!(after.receipts.is_empty());
+        assert_eq!(after.lanes["test-lane"].active_run_id, None);
+        assert!(after.lanes["test-lane"].failure_paused);
+        let request_id = *after.requests.keys().next().unwrap();
+        assert_eq!(
+            after.requests[&request_id].status,
+            RequestStatus::NeedsAttention
+        );
+        assert!(
+            after
+                .events
+                .iter()
+                .any(|e| e.kind == "failure_stop_verified"
+                    && e.message.contains("observer_config_sha256"))
+        );
+        service.scheduler_tick().await.unwrap();
+        assert_eq!(
+            service.snapshot().await.runs.len(),
+            1,
+            "failure must not automatically retry"
+        );
+        assert_eq!(std::fs::read_to_string(&marker).unwrap().lines().count(), 1);
+        assert!(!service.observe_failed_stop(&run).await.unwrap());
+        assert_eq!(service.snapshot().await.events, after.events);
+        service.retry(request_id).await.unwrap();
+        assert!(!service.snapshot().await.lanes["test-lane"].failure_paused);
+        service.scheduler_tick().await.unwrap();
+        let next = service.snapshot().await;
+        let new_owner = next.lanes["test-lane"].active_run_id;
+        assert!(new_owner.is_some() && new_owner != Some(run_id));
+        assert!(!service.observe_failed_stop(&run).await.unwrap());
+        assert_eq!(
+            service.snapshot().await.lanes["test-lane"].active_run_id,
+            new_owner
+        );
+        let stale = service
+            .transact(Some("test-lane"), |engine, state, _| {
+                engine.confirm_failed_proven(
+                    state,
+                    run_id,
+                    run.generation + 1,
+                    run.executor_ref.as_deref().unwrap(),
+                    "proof",
+                    "late proof",
+                    Utc::now(),
+                )?;
+                Ok(())
+            })
+            .await;
+        assert!(stale.is_err());
+        assert_eq!(
+            service.snapshot().await.lanes["test-lane"].active_run_id,
+            new_owner
+        );
+    }
+
+    #[tokio::test]
+    async fn failure_only_observer_cannot_adopt_running_or_use_unproven_stop() {
+        let (_temp, mut config, service, marker) = hook_test_service().await;
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+        let run = service.snapshot().await.runs[&run_id].clone();
+        service
+            .apply_hook_reply(HookOperation::Observe, None, &run, failed_observation(&run))
+            .await
+            .unwrap();
+        let path = marker.with_file_name("failure-observe.py");
+        write_failure_observer(&path, "unproven");
+        config.lanes[0].failure_observe = Some(HookConfig::Script {
+            path: path.clone(),
+            interpreter: "python3".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 5_000,
+        });
+        drop(service);
+        let service = Service::open(config).await.unwrap();
+        let before = service.snapshot().await;
+        for mode in [
+            "running",
+            "unproven",
+            "wrong_generation",
+            "wrong_ref",
+            "stale",
+        ] {
+            write_failure_observer(&path, mode);
+            assert!(!service.observe_failed_stop(&run).await.unwrap(), "{mode}");
+            let after = service.snapshot().await;
+            assert_eq!(after.runs[&run_id].state, RunState::Unknown, "{mode}");
+            assert_eq!(
+                after.lanes["test-lane"].active_run_id,
+                Some(run_id),
+                "{mode}"
+            );
+            assert_eq!(after.events, before.events, "{mode}");
+        }
+        assert!(
+            service
+                .resolve_unknown(
+                    "test-lane".into(),
+                    ResolveAction::ConfirmStopped,
+                    "operator assertion".into(),
+                    "no proof".into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.snapshot().await.lanes["test-lane"].active_run_id,
+            Some(run_id)
         );
     }
 }

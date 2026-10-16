@@ -1552,6 +1552,7 @@ mod tests {
             components: vec!["app".into()],
             allow_descendant: true,
             allow_preemption: true,
+            failure_observe: None,
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
         };
@@ -1980,6 +1981,7 @@ mod tests {
             components: vec!["app".into()],
             allow_descendant: true,
             allow_preemption: true,
+            failure_observe: None,
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
         };

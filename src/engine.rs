@@ -1018,6 +1018,98 @@ impl Engine {
         Ok(())
     }
 
+    /// An observed process stop proves failure, never successful deployment or
+    /// cancellation. Keep requests on an explicit-retry failure barrier.
+    #[allow(clippy::too_many_arguments)]
+    pub fn confirm_failed_proven(
+        &self,
+        state: &mut State,
+        run_id: Uuid,
+        generation: u64,
+        executor_ref: &str,
+        evidence_record: &str,
+        message: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        if evidence_record.trim().is_empty() || evidence_record.len() > 16_384 {
+            return Err(DomainError::OwnershipUnproven);
+        }
+        let mut run = state
+            .runs
+            .get(&run_id)
+            .cloned()
+            .ok_or(DomainError::RunNotFound)?;
+        if run.generation != generation
+            || executor_ref.trim().is_empty()
+            || run
+                .executor_ref
+                .as_deref()
+                .is_some_and(|value| value != executor_ref)
+        {
+            return Err(DomainError::ExecutorMismatch);
+        }
+        if run.state == RunState::Failed {
+            return Ok(());
+        }
+        ensure_active_owner(state, &run, generation)?;
+        if !matches!(
+            run.state,
+            RunState::Dispatching
+                | RunState::Running
+                | RunState::CancelRequested
+                | RunState::Unknown
+        ) {
+            return Err(DomainError::InvalidTransition);
+        }
+        run.executor_ref = Some(executor_ref.to_owned());
+        run.state = RunState::Failed;
+        run.updated_at = now;
+        state.runs.insert(run_id, run.clone());
+        emit(
+            state,
+            &run.lane_id,
+            Some(run_id),
+            None,
+            now,
+            "failure_stop_verified",
+            evidence_record,
+        );
+        settle_failed_run(state, &run, now, message);
+        Ok(())
+    }
+
+    /// Observation summaries are state snapshots, unlike sequenced executor
+    /// output. Persist changed summaries while preserving every new log line.
+    #[allow(clippy::too_many_arguments)]
+    pub fn record_hook_observation(
+        &self,
+        state: &mut State,
+        run_id: Uuid,
+        source: &str,
+        signature: &str,
+        level: &str,
+        message: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        let run = state.runs.get(&run_id).ok_or(DomainError::RunNotFound)?;
+        let lane_id = run.lane_id.clone();
+        let kind = format!("hook_observation.{source}");
+        if state
+            .events
+            .iter()
+            .rev()
+            .find(|event| event.run_id == Some(run_id) && event.kind == kind)
+            .is_some_and(|event| event.message == signature)
+        {
+            return Ok(());
+        }
+        emit(state, &lane_id, Some(run_id), None, now, &kind, signature);
+        if !message.trim().is_empty() {
+            self.record_executor_log(state, run_id, level, message, now)?;
+        }
+        Ok(())
+    }
+
     #[allow(
         clippy::too_many_arguments,
         reason = "Transitions carry explicit state, ownership fence, proof, and clock inputs"
@@ -2268,6 +2360,26 @@ fn mark_unknown_inner(
         .ok_or_else(|| DomainError::LaneNotFound(run.lane_id.clone()))?;
     if lane.active_run_id != Some(run.id) || lane.generation != run.generation {
         return Err(DomainError::StaleGeneration);
+    }
+    let next_reason = if reason.trim().is_empty() {
+        UNKNOWN_BLOCK.to_owned()
+    } else {
+        format!("{UNKNOWN_BLOCK}: {}", reason.trim())
+    };
+    let event_message = format!(
+        "execution state unknown; lane ownership retained: {}",
+        reason.trim()
+    );
+    if run.state == RunState::Unknown
+        && (lane.blocked_reason.as_deref() == Some(&next_reason)
+            || state
+                .events
+                .iter()
+                .rev()
+                .find(|event| event.run_id == Some(run.id) && event.kind == "run_unknown")
+                .is_some_and(|event| event.message == event_message))
+    {
+        return Ok(());
     }
     run.state = RunState::Unknown;
     run.updated_at = now;

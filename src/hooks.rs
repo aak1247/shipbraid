@@ -73,6 +73,15 @@ pub struct HookReply {
     pub logs: Vec<HookLog>,
     #[serde(default)]
     pub receipt: Option<DeploymentReceipt>,
+    #[serde(default)]
+    pub failure_proof: Option<FailureProof>,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct FailureProof {
+    pub observed_at: chrono::DateTime<Utc>,
+    pub evidence: serde_json::Value,
 }
 
 #[derive(Clone, Debug)]
@@ -180,6 +189,26 @@ fn validate_reply(
         .is_some_and(|message| message.len() > MAX_HOOK_LOG_BYTES)
     {
         bail!("hook reply message exceeds configured limits");
+    }
+    if let Some(proof) = &reply.failure_proof
+        && (reply.status != HookStatus::Failed
+            || envelope.operation == HookOperation::Dispatch
+            || reply.executor_ref.is_none()
+            || envelope
+                .run
+                .executor_ref
+                .as_ref()
+                .is_some_and(|expected| reply.executor_ref.as_ref() != Some(expected))
+            || reply.receipt.is_some()
+            || proof.observed_at < call_started_at
+            || proof.observed_at > received_at
+            || proof
+                .evidence
+                .as_object()
+                .is_none_or(|value| value.is_empty())
+            || serde_json::to_vec(&proof.evidence)?.len() > 8192)
+    {
+        bail!("failed-stop proof is not a fresh, fenced observation");
     }
     match (envelope.operation, reply.status, reply.receipt.as_ref()) {
         (HookOperation::Verify, HookStatus::Verified, Some(receipt)) => {
@@ -401,6 +430,7 @@ mod tests {
             environment_known_unchanged: None,
             logs: vec![],
             receipt: None,
+            failure_proof: None,
         };
         assert!(validate_reply(&reply, &envelope, Utc::now(), Utc::now()).is_err());
     }
@@ -437,6 +467,7 @@ mod tests {
             environment_known_unchanged: None,
             logs: vec![],
             receipt: Some(receipt),
+            failure_proof: None,
         };
         assert!(validate_reply(&reply, &envelope, call_started_at, Utc::now()).is_err());
     }
@@ -447,5 +478,75 @@ mod tests {
         let reply: HookReply = serde_json::from_value(value).unwrap();
         assert_eq!(reply.status, HookStatus::Started);
         assert!(matches!(HookCall::Accepted, HookCall::Accepted));
+    }
+    #[test]
+    fn failure_stop_proof_requires_fresh_fenced_non_dispatch_observation() {
+        let (lane, mut run) = fixture();
+        run.executor_ref = Some("unit".into());
+        let start = Utc::now();
+        let observed = start + chrono::Duration::milliseconds(1);
+        let end = start + chrono::Duration::milliseconds(2);
+        let valid = HookReply {
+            version: 1,
+            run_id: run.id,
+            generation: run.generation,
+            executor_ref: Some("unit".into()),
+            status: HookStatus::Failed,
+            message: None,
+            environment_known_unchanged: Some(false),
+            logs: vec![],
+            receipt: None,
+            failure_proof: Some(FailureProof {
+                observed_at: observed,
+                evidence: serde_json::json!({"supervisor": "stopped", "cgroup": "empty"}),
+            }),
+        };
+        let check = |reply: &HookReply, operation| {
+            validate_reply(
+                reply,
+                &HookEnvelope {
+                    version: 1,
+                    operation,
+                    command: None,
+                    run: &run,
+                    lane: &lane,
+                },
+                start,
+                end,
+            )
+        };
+        assert!(check(&valid, HookOperation::Observe).is_ok());
+        assert!(check(&valid, HookOperation::Verify).is_ok());
+        assert!(check(&valid, HookOperation::Dispatch).is_err());
+        let mut cases = Vec::new();
+        let mut stale = valid.clone();
+        stale.failure_proof.as_mut().unwrap().observed_at =
+            start - chrono::Duration::milliseconds(1);
+        cases.push(stale);
+        let mut future = valid.clone();
+        future.failure_proof.as_mut().unwrap().observed_at =
+            end + chrono::Duration::milliseconds(1);
+        cases.push(future);
+        let mut wrong_ref = valid.clone();
+        wrong_ref.executor_ref = Some("other-unit".into());
+        cases.push(wrong_ref);
+        let mut missing_ref = valid.clone();
+        missing_ref.executor_ref = None;
+        cases.push(missing_ref);
+        let mut wrong_generation = valid.clone();
+        wrong_generation.generation += 1;
+        cases.push(wrong_generation);
+        let mut running = valid.clone();
+        running.status = HookStatus::Running;
+        cases.push(running);
+        let mut empty = valid.clone();
+        empty.failure_proof.as_mut().unwrap().evidence = serde_json::json!({});
+        cases.push(empty);
+        let mut huge = valid.clone();
+        huge.failure_proof.as_mut().unwrap().evidence = serde_json::json!({"x": "x".repeat(8192)});
+        cases.push(huge);
+        for bad in cases {
+            assert!(check(&bad, HookOperation::Observe).is_err(), "{bad:?}");
+        }
     }
 }

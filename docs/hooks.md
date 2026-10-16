@@ -56,6 +56,35 @@ status 可为 started/running/completed/failed/unknown/verified。started/runnin
 
 调用 dispatch 前服务端先持久化不可抢占区间和命令投递意图；重启只观察，绝不盲重发 dispatch。Verify 投递后丢响应可重新只读验收，但仍需新观察与匹配回执。配置指纹变化时不会用新 hook 处理旧 run，需恢复被冻结配置并核对状态。
 
+## 失败后的停止证明与恢复
+
+`failed` 本身不证明部署进程及子任务已经停止。observe/verify 可额外返回：
+
+```json
+{"version":1,"run_id":"<uuid>","generation":1,"executor_ref":"<stable-id>","status":"failed","failure_proof":{"observed_at":"<fresh UTC timestamp>","evidence":{"supervisor":"stopped","process_tree":"empty"}}}
+```
+
+上例只展示字段形状，不能用静态文本替代真实证据。管理员配置的观察器必须核对完整冻结目标、run/generation、稳定执行器身份及监督器调用身份，独立确认终态和整个进程子树已停止。`observed_at` 必须落在此次调用窗口内；evidence 必须是非空对象，最多 8 KiB。dispatch、不匹配身份、过期证明或带 receipt 的失败证明均被拒绝。完整证据追加到 `failure_stop_verified` 审计事件。
+
+确认后执行变为 `failed`、释放该执行所有权，通道进入 `failure_paused`，相关请求进入 `needs_attention`，由操作者显式重试。它不产生成功 receipt，不满足请求，也不承诺环境没有变化；缺少证明时继续 `unknown` 并保留所有权。
+
+旧冻结观察器无法生成该字段时，可在同一 lane 添加独立的只读失败观察器：
+
+```toml
+[lanes.failure_observe]
+kind = "script"
+path = "/srv/ci-bridge/failure-observe.py"
+interpreter = "/usr/bin/python3"
+args = []
+timeout_ms = 10000
+```
+
+该配置支持与其他 hook 相同的 command/script/webhook 传输，必须由管理员审查为只读，输入仍为 `operation=observe`。协调器只接受其 `failed + failure_proof`，忽略其他结果；它不能 dispatch、接纳 running 或验收成功。该补充观察器不改变原执行 profile，原 dispatch/observe/verify 路径和参数必须保持冻结值，目标、generation、所有权检查仍然生效。审计证据记录补充观察器配置的 SHA-256。显式 `confirm_stopped` 也要求重新获取同样的新鲜证据，人工备注不能代替证明。
+
+AutoTask bridge 核对持久 request/result、systemd Id/InvocationID、非零退出状态及前后稳定的监督器快照，并递归检查 cgroup 子树及 `populated=0`；不存在的 unit、活动后代、不可读证据或检查期间变化均不生成证明。旧 result 不被改写，额外要求监督器 ExecStart 精确绑定该 request 路径、退出时间与持久结果相差不超过 10 秒。
+
+相同的观察摘要与 unknown 原因只记录一次，去重标记随账本持久化；新状态或原因仍会记录。带新源序号的真实日志即使文字相同也会保存，历史重复审计行不会删除。
+
 ## HTTP 与 CLI
 
 ```bash
