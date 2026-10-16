@@ -222,7 +222,12 @@ impl From<ServiceError> for ApiError {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SubmitBody {
-    lane_id: String,
+    #[serde(default)]
+    lane_id: Option<String>,
+    #[serde(default)]
+    project: Option<String>,
+    #[serde(default)]
+    environment: Option<String>,
     revision: String,
     components: Vec<String>,
     #[serde(default)]
@@ -293,6 +298,8 @@ struct ResolveUnknownBody {
 #[derive(Debug, Deserialize, Default)]
 struct ListQuery {
     lane_id: Option<String>,
+    project: Option<String>,
+    environment: Option<String>,
     after: Option<u64>,
     limit: Option<usize>,
 }
@@ -318,12 +325,13 @@ struct LogItem {
 
 #[derive(Debug, Serialize)]
 struct SystemView {
-    executor: &'static str,
+    executor: String,
     draining: bool,
     version: &'static str,
 }
 
 pub fn router(service: Arc<Service>) -> Router {
+    let dashboard_dir = service.dashboard_dir().map(std::path::Path::to_path_buf);
     let state = ApiState {
         tokens: service.tokens().to_vec(),
         service,
@@ -351,12 +359,18 @@ pub fn router(service: Arc<Service>) -> Router {
         .layer(middleware::from_fn_with_state(state.clone(), authenticate))
         .with_state(state.clone());
 
-    Router::new()
+    let mut router = Router::new()
         .route("/live", get(live))
         .route("/ready", get(ready))
         .nest("/v1", protected)
         .fallback(api_not_found)
-        .with_state(state)
+        .with_state(state);
+    if let Some(path) = dashboard_dir {
+        router = router.fallback_service(
+            tower_http::services::ServeDir::new(path).append_index_html_on_directories(true),
+        );
+    }
+    router
 }
 
 async fn authenticate(
@@ -421,7 +435,7 @@ async fn system(
     require_non_executor(&actor)?;
     let snapshot = state.service.snapshot().await;
     Ok(Json(SystemView {
-        executor: "scripted",
+        executor: state.service.executor_mix(),
         draining: snapshot.draining,
         version: env!("CARGO_PKG_VERSION"),
     }))
@@ -430,14 +444,26 @@ async fn system(
 async fn list_lanes(
     State(state): State<ApiState>,
     axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Query(query): Query<ListQuery>,
 ) -> Result<Json<Items<Value>>, ApiError> {
     require_non_executor(&actor)?;
     let snapshot = state.service.snapshot().await;
+    let lane_filter = scoped_lane_filter(
+        &actor,
+        query.lane_id.as_deref(),
+        query.project.as_deref(),
+        query.environment.as_deref(),
+        &snapshot,
+    )?;
     let items = snapshot
         .lanes
         .values()
-        .filter(|lane| lane_allowed(&actor, lane))
-        .map(lane_view)
+        .filter(|lane| {
+            lane_filter
+                .as_ref()
+                .is_none_or(|ids| ids.contains(&lane.id))
+        })
+        .map(|lane| lane_view(lane, state.service.executor_kind(&lane.id)))
         .collect();
     Ok(Json(Items { items }))
 }
@@ -454,7 +480,7 @@ async fn get_lane(
         .get(&lane_id)
         .ok_or_else(|| ApiError::missing("Lane not found."))?;
     require_lane(&actor, lane)?;
-    Ok(Json(lane_view(lane)))
+    Ok(Json(lane_view(lane, state.service.executor_kind(&lane.id))))
 }
 
 async fn list_requests(
@@ -464,7 +490,13 @@ async fn list_requests(
 ) -> Result<Json<Items<Value>>, ApiError> {
     require_non_executor(&actor)?;
     let snapshot = state.service.snapshot().await;
-    let lane_filter = scoped_lane_filter(&actor, query.lane_id.as_deref(), &snapshot)?;
+    let lane_filter = scoped_lane_filter(
+        &actor,
+        query.lane_id.as_deref(),
+        query.project.as_deref(),
+        query.environment.as_deref(),
+        &snapshot,
+    )?;
     let mut requests: Vec<_> = snapshot
         .requests
         .values()
@@ -510,7 +542,13 @@ async fn list_runs(
 ) -> Result<Json<Items<Value>>, ApiError> {
     require_non_executor(&actor)?;
     let snapshot = state.service.snapshot().await;
-    let lane_filter = scoped_lane_filter(&actor, query.lane_id.as_deref(), &snapshot)?;
+    let lane_filter = scoped_lane_filter(
+        &actor,
+        query.lane_id.as_deref(),
+        query.project.as_deref(),
+        query.environment.as_deref(),
+        &snapshot,
+    )?;
     let mut runs: Vec<_> = snapshot
         .runs
         .values()
@@ -630,15 +668,15 @@ async fn create_request(
     require_non_executor(&actor)?;
     let body = parse_body(body)?;
     validate_submit(&body)?;
-    let lane = {
-        let snapshot = state.service.snapshot().await;
-        let lane = snapshot
-            .lanes
-            .get(&body.lane_id)
-            .ok_or_else(|| ApiError::missing("Lane not found."))?;
-        require_lane(&actor, lane)?;
-        lane.clone()
-    };
+    let snapshot = state.service.snapshot().await;
+    let lane = resolve_lane_selector(
+        &actor,
+        body.lane_id.as_deref(),
+        body.project.as_deref(),
+        body.environment.as_deref(),
+        &snapshot,
+    )?
+    .clone();
     if body.priority == Priority::Urgent && !actor.admin && !actor.urgent {
         return Err(ApiError::forbidden());
     }
@@ -660,8 +698,17 @@ async fn create_request(
                 "A nonempty Idempotency-Key of at most 128 bytes is required.",
             )
         })?;
-    let body_value = serde_json::to_value(&body)
-        .map_err(|_| ApiError::bad_request("invalid_request", "The request body is invalid."))?;
+    let mut components = body.components.clone();
+    components.sort();
+    let body_value = json!({
+        "lane_id": &lane.id,
+        "revision": &body.revision,
+        "components": &components,
+        "coverage_mode": &body.coverage_mode,
+        "priority": &body.priority,
+        "deadline_at": &body.deadline_at,
+        "reason": &body.reason,
+    });
     let request_hash = hex::encode(Sha256::digest(
         serde_json::to_vec(&body_value).unwrap_or_default(),
     ));
@@ -671,7 +718,7 @@ async fn create_request(
             actor.id,
             idempotency_key.to_owned(),
             request_hash,
-            body.lane_id,
+            lane.id,
             body.revision,
             body.components,
             body.coverage_mode,
@@ -886,7 +933,7 @@ async fn resolve_unknown(
         .lanes
         .get(&lane_id)
         .ok_or_else(|| ApiError::missing("Lane not found."))?;
-    Ok(Json(lane_view(lane)))
+    Ok(Json(lane_view(lane, state.service.executor_kind(&lane.id))))
 }
 
 async fn drain(
@@ -925,10 +972,34 @@ fn parse_body<T: DeserializeOwned>(body: Result<Json<T>, JsonRejection>) -> Resu
 }
 
 fn validate_submit(body: &SubmitBody) -> Result<(), ApiError> {
-    if body.lane_id.is_empty() || body.lane_id.len() > 128 {
+    if body
+        .lane_id
+        .as_ref()
+        .is_some_and(|lane_id| lane_id.is_empty() || lane_id.len() > 128)
+        || body
+            .project
+            .as_ref()
+            .is_some_and(|project| project.is_empty() || project.len() > 128)
+        || body
+            .environment
+            .as_ref()
+            .is_some_and(|environment| environment.is_empty() || environment.len() > 128)
+    {
         return Err(ApiError::bad_request(
             "invalid_request",
-            "lane_id is required and must be at most 128 bytes.",
+            "lane selectors must be nonempty and at most 128 bytes.",
+        ));
+    }
+    if body.lane_id.is_none() && (body.project.is_none() || body.environment.is_none()) {
+        return Err(ApiError::bad_request(
+            "lane_selector_required",
+            "Supply lane_id or both project and environment.",
+        ));
+    }
+    if body.project.is_some() != body.environment.is_some() {
+        return Err(ApiError::bad_request(
+            "invalid_lane_selector",
+            "project and environment must be supplied together.",
         ));
     }
     if !crate::lineage::is_full_revision(&body.revision) {
@@ -1012,15 +1083,13 @@ fn require_lane_id(actor: &Actor, lane_id: &str, snapshot: &DomainState) -> Resu
 fn scoped_lane_filter(
     actor: &Actor,
     requested: Option<&str>,
+    project: Option<&str>,
+    environment: Option<&str>,
     snapshot: &DomainState,
 ) -> Result<Option<BTreeSet<String>>, ApiError> {
-    if let Some(lane_id) = requested {
-        let lane = snapshot
-            .lanes
-            .get(lane_id)
-            .ok_or_else(|| ApiError::missing("Lane not found."))?;
-        require_lane(actor, lane)?;
-        return Ok(Some(BTreeSet::from([lane_id.to_owned()])));
+    if requested.is_some() || project.is_some() || environment.is_some() {
+        let lane = resolve_lane_selector(actor, requested, project, environment, snapshot)?;
+        return Ok(Some(BTreeSet::from([lane.id.clone()])));
     }
     if actor.admin {
         return Ok(None);
@@ -1033,6 +1102,62 @@ fn scoped_lane_filter(
             .map(|lane| lane.id.clone())
             .collect(),
     ))
+}
+
+fn resolve_lane_selector<'a>(
+    actor: &Actor,
+    requested: Option<&str>,
+    project: Option<&str>,
+    environment: Option<&str>,
+    snapshot: &'a DomainState,
+) -> Result<&'a Lane, ApiError> {
+    if project.is_some() != environment.is_some() {
+        return Err(ApiError::bad_request(
+            "invalid_lane_selector",
+            "project and environment must be supplied together.",
+        ));
+    }
+    let lane = if let Some(lane_id) = requested {
+        let lane = snapshot
+            .lanes
+            .get(lane_id)
+            .ok_or_else(|| ApiError::missing("Lane not found."))?;
+        if project.is_some_and(|value| value != lane.project)
+            || environment.is_some_and(|value| value != lane.environment)
+        {
+            return Err(ApiError::bad_request(
+                "lane_selector_mismatch",
+                "lane_id does not match the supplied project and environment.",
+            ));
+        }
+        lane
+    } else {
+        let (Some(project), Some(environment)) = (project, environment) else {
+            return Err(ApiError::bad_request(
+                "lane_selector_required",
+                "Supply lane_id or both project and environment.",
+            ));
+        };
+        let matching = snapshot
+            .lanes
+            .values()
+            .filter(|lane| lane.project == project && lane.environment == environment)
+            .collect::<Vec<_>>();
+        match matching.as_slice() {
+            [] => return Err(ApiError::missing("Lane not found.")),
+            [lane] => *lane,
+            _ => {
+                return Err(ApiError::new(
+                    StatusCode::CONFLICT,
+                    "ambiguous_lane",
+                    "The project and environment resolve to more than one configured lane.",
+                    false,
+                ));
+            }
+        }
+    };
+    require_lane(actor, lane)?;
+    Ok(lane)
 }
 
 fn require_non_executor(actor: &Actor) -> Result<(), ApiError> {
@@ -1059,11 +1184,12 @@ fn require_admin(actor: &Actor) -> Result<(), ApiError> {
     }
 }
 
-fn lane_view(lane: &Lane) -> Value {
+fn lane_view(lane: &Lane, executor_kind: &str) -> Value {
     json!({
         "id": lane.id,
         "project": lane.project,
         "environment": lane.environment,
+        "executor_kind": executor_kind,
         "profile_digest": lane.profile_digest,
         "active_run_id": lane.active_run_id,
         "generation": lane.generation,
@@ -1166,7 +1292,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        config::{Config, LaneConfig, TokenConfig},
+        config::{Config, LaneConfig, LaneExecutorConfig, TokenConfig},
         service::Service,
     };
 
@@ -1255,6 +1381,7 @@ mod tests {
             allow_descendant: true,
             allow_preemption: true,
             enabled: true,
+            executor: LaneExecutorConfig::Scripted,
         };
         let config = Config {
             database_path: temp.path().join("state.db"),
@@ -1281,6 +1408,15 @@ mod tests {
         assert_eq!(no_auth.status(), StatusCode::UNAUTHORIZED);
         let denied_lane = send(app.clone(), "GET", "/v1/lanes/lane-two", Some(&token), None).await;
         assert_eq!(denied_lane.status(), StatusCode::FORBIDDEN);
+        let denied_environment = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes?project=project-two&environment=test",
+            Some(&token),
+            None,
+        )
+        .await;
+        assert_eq!(denied_environment.status(), StatusCode::FORBIDDEN);
 
         let urgent = format!(
             "{{\"lane_id\":\"lane-one\",\"revision\":\"{revision}\",\"components\":[\"app\"],\"coverage_mode\":\"exact\",\"priority\":\"urgent\",\"reason\":\"test\"}}"
@@ -1299,6 +1435,7 @@ mod tests {
             "{{\"lane_id\":\"lane-one\",\"revision\":\"{revision}\",\"components\":[\"app\"],\"coverage_mode\":\"exact\",\"priority\":\"normal\",\"reason\":\"test\"}}"
         );
         let accepted = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .method("POST")
@@ -1317,5 +1454,28 @@ mod tests {
                 .unwrap();
         assert!(payload["id"].as_str().is_some());
         assert_eq!(payload["lane_id"], "lane-one");
+
+        let alternate = format!(
+            "{{\"project\":\"project-one\",\"environment\":\"test\",\"revision\":\"{revision}\",\"components\":[\"app\"],\"coverage_mode\":\"exact\",\"priority\":\"normal\",\"reason\":\"test\"}}"
+        );
+        let reused = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/v1/requests")
+                    .header(AUTHORIZATION, format!("Bearer {token}"))
+                    .header("content-type", "application/json")
+                    .header("idempotency-key", "api-test-key")
+                    .body(Body::from(alternate))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(reused.status(), StatusCode::ACCEPTED);
+        let reused: Value =
+            serde_json::from_slice(&reused.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(reused["id"], payload["id"]);
+        assert_eq!(reused["reused"], true);
     }
 }

@@ -8,7 +8,7 @@ use std::{
 };
 
 #[derive(Parser)]
-#[command(version, about = "发布请求协调器（M1: ScriptedExecutor）")]
+#[command(version, about = "发布请求协调器")]
 struct Cli {
     #[arg(
         long,
@@ -24,20 +24,31 @@ struct Cli {
         hide_env_values = true
     )]
     token: Option<String>,
+    #[arg(
+        long,
+        global = true,
+        env = "AUTO_DELIVER_TOKEN_FILE",
+        conflicts_with = "token"
+    )]
+    token_file: Option<PathBuf>,
     #[command(subcommand)]
     command: Command,
 }
 #[derive(Subcommand)]
 enum Command {
-    /// Start the durable coordinator (ScriptedExecutor only).
+    /// Start the durable coordinator with configured executors.
     Serve {
         #[arg(long)]
         config: PathBuf,
     },
     /// Submit an immutable release request; retries must reuse the same key.
     Submit {
-        #[arg(long)]
-        lane: String,
+        #[arg(long, required_unless_present = "project", conflicts_with_all = ["project", "environment"])]
+        lane: Option<String>,
+        #[arg(long, requires = "environment", required_unless_present = "lane")]
+        project: Option<String>,
+        #[arg(long, requires = "project")]
+        environment: Option<String>,
         #[arg(long)]
         revision: String,
         #[arg(long, value_delimiter = ',', required = true)]
@@ -100,7 +111,7 @@ enum Command {
     Drain,
     /// Resume dispatch after an explicit drain.
     Resume,
-    /// Resolve unknown only with independently observed scripted evidence.
+    /// Resolve unknown only with independently observed executor evidence.
     ResolveUnknown {
         #[arg(long)]
         lane: String,
@@ -174,8 +185,15 @@ impl Api {
             || base.password().is_some()
             || base.query().is_some()
             || base.fragment().is_some()
+            || (base.scheme() == "http"
+                && !matches!(
+                    base.host_str(),
+                    Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
+                ))
         {
-            bail!("server URL must be HTTP(S), without credentials, query or fragment");
+            bail!(
+                "server URL must use HTTPS (or loopback HTTP), without credentials, query or fragment"
+            );
         }
         base.set_path(&format!("{}/", base.path().trim_end_matches('/')));
         let client = Client::builder()
@@ -264,11 +282,22 @@ async fn run(cli: Cli) -> Result<u8> {
         auto_deliver::service::serve(auto_deliver::config::Config::load(config)?).await?;
         return Ok(0);
     }
-    let api = Api::new(&cli.url, cli.token)?;
+    let token = match cli.token_file {
+        Some(path) => Some(
+            std::fs::read_to_string(path)
+                .context("cannot read token file")?
+                .trim()
+                .to_owned(),
+        ),
+        None => cli.token,
+    };
+    let api = Api::new(&cli.url, token)?;
     let value = match cli.command {
         Command::Serve { .. } => unreachable!(),
         Command::Submit {
             lane,
+            project,
+            environment,
             revision,
             components,
             coverage,
@@ -279,7 +308,17 @@ async fn run(cli: Cli) -> Result<u8> {
         } => {
             let key = idempotency_key.unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
             eprintln!("idempotency-key: {key}");
-            api.call(Method::POST, "/v1/requests", Some(json!({"lane_id":lane,"revision":revision,"components":components,"coverage_mode":coverage.as_str(),"priority":priority.as_str(),"deadline_at":deadline,"reason":reason})), Some(&key)).await?
+            let mut body = json!({"revision":revision,"components":components,"coverage_mode":coverage.as_str(),"priority":priority.as_str(),"deadline_at":deadline,"reason":reason});
+            if let Some(lane) = lane {
+                body["lane_id"] = lane.into();
+            } else {
+                body["project"] = project.context("project is required without lane")?.into();
+                body["environment"] = environment
+                    .context("environment is required without lane")?
+                    .into();
+            }
+            api.call(Method::POST, "/v1/requests", Some(body), Some(&key))
+                .await?
         }
         Command::Wait {
             request_id,
@@ -395,8 +434,28 @@ mod tests {
         assert!(segment("demo-test").is_ok());
     }
     #[test]
+    fn submit_requires_one_unambiguous_environment_selector() {
+        let base = [
+            "auto-deliver",
+            "submit",
+            "--revision",
+            "0123456789012345678901234567890123456789",
+            "--components",
+            "app",
+        ];
+        let parse = |extra: &[&str]| Cli::try_parse_from(base.iter().chain(extra.iter()).copied());
+        assert!(parse(&["--lane", "dev"]).is_ok());
+        assert!(parse(&["--project", "app", "--environment", "dev"]).is_ok());
+        assert!(parse(&[]).is_err());
+        assert!(parse(&["--project", "app"]).is_err());
+        assert!(parse(&["--lane", "dev", "--project", "app", "--environment", "dev"]).is_err());
+    }
+    #[test]
     fn api_rejects_urls_with_embedded_credentials() {
         assert!(Api::new("https://user:secret@example.com", None).is_err());
         assert!(Api::new("file:///tmp/socket", None).is_err());
+        assert!(Api::new("http://192.0.2.1:8787", None).is_err());
+        assert!(Api::new("http://127.0.0.1:8787", None).is_ok());
+        assert!(Api::new("https://example.com", None).is_ok());
     }
 }

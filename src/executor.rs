@@ -64,6 +64,11 @@ impl ScriptedExecutor {
             .filter(|command| {
                 command.kind == CommandKind::Dispatch
                     && command.delivery_state == CommandDeliveryState::Acknowledged
+                    && state.runs.get(&command.run_id).is_some_and(|run| {
+                        run.executor_ref
+                            .as_deref()
+                            .is_some_and(|identity| identity.starts_with("scripted:"))
+                    })
             })
             .count()
     }

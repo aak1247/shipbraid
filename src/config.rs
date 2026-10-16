@@ -1,5 +1,5 @@
 use anyhow::{Context, Result, bail};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     net::SocketAddr,
@@ -18,6 +18,7 @@ pub struct Config {
     pub scripted_phase_ms: u64,
     pub cancel_timeout_seconds: u64,
     pub coalesce_ms: u64,
+    pub dashboard_dir: Option<PathBuf>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -31,6 +32,7 @@ impl Default for Config {
             scripted_phase_ms: 3000,
             cancel_timeout_seconds: 60,
             coalesce_ms: 2000,
+            dashboard_dir: None,
         }
     }
 }
@@ -78,6 +80,71 @@ pub struct LaneConfig {
     pub allow_preemption: bool,
     #[serde(default = "default_enabled")]
     pub enabled: bool,
+    #[serde(default)]
+    pub executor: LaneExecutorConfig,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+#[allow(
+    clippy::large_enum_variant,
+    reason = "Administrator configuration is loaded once; keep named inline hook fields in its serde schema"
+)]
+pub enum LaneExecutorConfig {
+    #[default]
+    Scripted,
+    Hooks {
+        dispatch: HookConfig,
+        observe: HookConfig,
+        verify: HookConfig,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HookConfig {
+    Command {
+        program: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+        timeout_ms: u64,
+    },
+    Script {
+        path: PathBuf,
+        interpreter: PathBuf,
+        #[serde(default)]
+        args: Vec<String>,
+        #[serde(default)]
+        cwd: Option<PathBuf>,
+        timeout_ms: u64,
+    },
+    Webhook {
+        url: String,
+        token_env: String,
+        timeout_ms: u64,
+    },
+}
+
+impl LaneExecutorConfig {
+    pub fn kind(&self) -> &'static str {
+        match self {
+            Self::Scripted => "scripted",
+            Self::Hooks { .. } => "hooks",
+        }
+    }
+
+    pub fn hooks(&self) -> Option<(&HookConfig, &HookConfig, &HookConfig)> {
+        match self {
+            Self::Scripted => None,
+            Self::Hooks {
+                dispatch,
+                observe,
+                verify,
+            } => Some((dispatch, observe, verify)),
+        }
+    }
 }
 fn default_enabled() -> bool {
     true
@@ -96,9 +163,44 @@ impl Config {
         if config.database_path.is_relative() {
             config.database_path = base.join(&config.database_path);
         }
+        if let Some(dashboard_dir) = &mut config.dashboard_dir
+            && dashboard_dir.is_relative()
+        {
+            *dashboard_dir = base.join(&*dashboard_dir);
+        }
         for lane in &mut config.lanes {
             if lane.repository_path.is_relative() {
                 lane.repository_path = base.join(&lane.repository_path);
+            }
+            if let LaneExecutorConfig::Hooks {
+                dispatch,
+                observe,
+                verify,
+            } = &mut lane.executor
+            {
+                for hook in [dispatch, observe, verify] {
+                    match hook {
+                        HookConfig::Command { program, cwd, .. } => {
+                            resolve_program(base, program);
+                            if let Some(cwd) = cwd {
+                                resolve_path(base, cwd);
+                            }
+                        }
+                        HookConfig::Script {
+                            path,
+                            interpreter,
+                            cwd,
+                            ..
+                        } => {
+                            resolve_path(base, path);
+                            resolve_program(base, interpreter);
+                            if let Some(cwd) = cwd {
+                                resolve_path(base, cwd);
+                            }
+                        }
+                        HookConfig::Webhook { .. } => {}
+                    }
+                }
             }
         }
         config.validate()?;
@@ -114,6 +216,13 @@ impl Config {
         }
         if self.tokens.is_empty() {
             bail!("at least one authentication token must be configured");
+        }
+        if self
+            .dashboard_dir
+            .as_ref()
+            .is_some_and(|path| !path.is_dir())
+        {
+            bail!("configured dashboard directory does not exist");
         }
         let mut lane_ids = std::collections::HashSet::new();
         for lane in &self.lanes {
@@ -137,6 +246,18 @@ impl Config {
                     "configured repository directory missing for lane {}",
                     lane.id
                 );
+            }
+            if lane.executor.kind() == "hooks" && lane.allow_preemption {
+                bail!("hook lane {} must disable preemption", lane.id);
+            }
+            if let Some((dispatch, observe, verify)) = lane.executor.hooks() {
+                for (name, hook) in [
+                    ("dispatch", dispatch),
+                    ("observe", observe),
+                    ("verify", verify),
+                ] {
+                    validate_hook(&lane.id, name, hook)?;
+                }
             }
         }
         let mut token_ids = std::collections::HashSet::new();
@@ -183,6 +304,111 @@ impl Config {
             })
             .collect()
     }
+
+    pub fn effective_profile_digest(&self, lane: &LaneConfig) -> Result<String> {
+        match &lane.executor {
+            LaneExecutorConfig::Scripted => Ok(lane.profile_digest.clone()),
+            LaneExecutorConfig::Hooks { .. } => {
+                let serialized = serde_json::to_vec(&lane.executor)
+                    .context("serialize configured executor profile")?;
+                let mut digest = Sha256::new();
+                digest.update(lane.profile_digest.as_bytes());
+                digest.update([0]);
+                digest.update(serialized);
+                Ok(hex::encode(digest.finalize()))
+            }
+        }
+    }
+}
+
+fn resolve_path(base: &Path, path: &mut PathBuf) {
+    if path.is_relative() {
+        *path = base.join(&*path);
+    }
+}
+
+fn resolve_program(base: &Path, path: &mut PathBuf) {
+    if path.is_relative() && path.components().count() > 1 {
+        *path = base.join(&*path);
+    }
+}
+
+fn validate_hook(lane: &str, operation: &str, hook: &HookConfig) -> Result<()> {
+    let timeout_ms = match hook {
+        HookConfig::Command {
+            program,
+            args,
+            cwd,
+            timeout_ms,
+        } => {
+            if program.as_os_str().is_empty()
+                || args.len() > 64
+                || cwd.as_ref().is_some_and(|path| !path.is_dir())
+            {
+                bail!("invalid {operation} command hook for lane {lane}");
+            }
+            validate_hook_args(lane, operation, args)?;
+            *timeout_ms
+        }
+        HookConfig::Script {
+            path,
+            interpreter,
+            args,
+            cwd,
+            timeout_ms,
+        } => {
+            if !path.is_file()
+                || interpreter.as_os_str().is_empty()
+                || args.len() > 64
+                || cwd.as_ref().is_some_and(|path| !path.is_dir())
+            {
+                bail!("invalid {operation} script hook for lane {lane}");
+            }
+            validate_hook_args(lane, operation, args)?;
+            *timeout_ms
+        }
+        HookConfig::Webhook {
+            url,
+            token_env,
+            timeout_ms,
+        } => {
+            let parsed = reqwest::Url::parse(url)
+                .with_context(|| format!("invalid {operation} webhook URL for lane {lane}"))?;
+            let host = parsed.host_str().unwrap_or_default();
+            if !matches!(parsed.scheme(), "http" | "https")
+                || host.is_empty()
+                || !parsed.username().is_empty()
+                || parsed.password().is_some()
+                || parsed.fragment().is_some()
+                || token_env.trim().is_empty()
+                || (parsed.scheme() == "http" && !is_loopback_host(host))
+            {
+                bail!("invalid {operation} webhook configuration for lane {lane}");
+            }
+            *timeout_ms
+        }
+    };
+    if !(100..=300_000).contains(&timeout_ms) {
+        bail!("{operation} hook timeout for lane {lane} must be between 100 and 300000 ms");
+    }
+    Ok(())
+}
+
+fn is_loopback_host(host: &str) -> bool {
+    host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|address| address.is_loopback())
+}
+
+fn validate_hook_args(lane: &str, operation: &str, args: &[String]) -> Result<()> {
+    if args
+        .iter()
+        .any(|arg| arg.len() > 4096 || arg.contains('\0'))
+    {
+        bail!("{operation} hook arguments for lane {lane} exceed configured limits");
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -204,5 +430,89 @@ mod tests {
         assert!(lane.enabled);
         assert!(!lane.allow_descendant);
         assert!(!lane.allow_preemption);
+        assert_eq!(lane.executor.kind(), "scripted");
+    }
+
+    #[test]
+    fn webhook_urls_do_not_send_bearers_to_plaintext_remote_hosts() {
+        let timeout = 1_000;
+        assert!(
+            validate_hook(
+                "dev",
+                "dispatch",
+                &HookConfig::Webhook {
+                    url: "http://127.0.0.1:9900/hook".into(),
+                    token_env: "HOOK_TOKEN".into(),
+                    timeout_ms: timeout,
+                }
+            )
+            .is_ok()
+        );
+        assert!(
+            validate_hook(
+                "dev",
+                "dispatch",
+                &HookConfig::Webhook {
+                    url: "http://example.com/hook".into(),
+                    token_env: "HOOK_TOKEN".into(),
+                    timeout_ms: timeout,
+                }
+            )
+            .is_err()
+        );
+        assert!(
+            validate_hook(
+                "dev",
+                "dispatch",
+                &HookConfig::Webhook {
+                    url: "https://example.com/hook".into(),
+                    token_env: "HOOK_TOKEN".into(),
+                    timeout_ms: timeout,
+                }
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn hook_profile_digest_changes_when_admin_transport_changes() {
+        let temp = tempfile::tempdir().unwrap();
+        let mut lane: LaneConfig = toml::from_str(&format!(
+            "id='test'\nproject='p'\nenvironment='dev'\nrepository_id='r'\nrepository_path='{}'\nrelease_ref='refs/heads/main'\nprofile_digest='base'\ncomponents=['app']\nallow_preemption=false",
+            temp.path().display()
+        ))
+        .unwrap();
+        lane.executor = LaneExecutorConfig::Hooks {
+            dispatch: HookConfig::Command {
+                program: "/bin/true".into(),
+                args: vec!["one".into()],
+                cwd: None,
+                timeout_ms: 1_000,
+            },
+            observe: HookConfig::Command {
+                program: "/bin/true".into(),
+                args: vec![],
+                cwd: None,
+                timeout_ms: 1_000,
+            },
+            verify: HookConfig::Command {
+                program: "/bin/true".into(),
+                args: vec![],
+                cwd: None,
+                timeout_ms: 1_000,
+            },
+        };
+        let config = Config::default();
+        let first = config.effective_profile_digest(&lane).unwrap();
+        let LaneExecutorConfig::Hooks { dispatch, .. } = &mut lane.executor else {
+            unreachable!()
+        };
+        *dispatch = HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec!["two".into()],
+            cwd: None,
+            timeout_ms: 1_000,
+        };
+        assert_ne!(first, config.effective_profile_digest(&lane).unwrap());
     }
 }

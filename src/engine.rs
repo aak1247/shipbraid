@@ -1,4 +1,4 @@
-use std::cmp::Reverse;
+use std::{cmp::Reverse, collections::BTreeMap};
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
@@ -802,43 +802,84 @@ impl Engine {
         Ok(())
     }
 
+    /// Fence an opaque external deployment hook as non-preemptible before any
+    /// hook side effect begins. The caller must commit this transition before
+    /// invoking the hook. Replays are a no-op while the same generation is
+    /// still dispatching in Deploying; ownership or generation changes reject.
+    pub fn begin_external_dispatch(
+        &self,
+        state: &mut State,
+        run_id: Uuid,
+        generation: u64,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        let mut run = state
+            .runs
+            .get(&run_id)
+            .cloned()
+            .ok_or(DomainError::RunNotFound)?;
+        ensure_active_owner(state, &run, generation)?;
+        if run.state != RunState::Dispatching {
+            return Err(DomainError::InvalidTransition);
+        }
+        if run.phase == Phase::Deploying {
+            return Ok(());
+        }
+        if !matches!(&run.phase, Phase::Preparing | Phase::Building) {
+            return Err(DomainError::InvalidTransition);
+        }
+
+        run.phase = Phase::Deploying;
+        run.phase_started_at = now;
+        run.updated_at = now;
+        state.runs.insert(run_id, run.clone());
+        emit(
+            state,
+            &run.lane_id,
+            Some(run_id),
+            None,
+            now,
+            "external_dispatch_admitted",
+            "run entered the non-preemptible deployment phase before external hook side effects",
+        );
+        Ok(())
+    }
+
     /// Produce the exact candidate/request Git pairs that coverage decisions
     /// for this lane can consult. The caller resolves these before invoking
     /// state transitions and shares the resulting context across them.
     pub fn coverage_queries(&self, state: &State, lane_id: &str) -> Vec<CoverageQuery> {
-        let mut candidates = state
+        let mut candidates_by_target = BTreeMap::<_, &Target>::new();
+        for request in state
             .requests
             .values()
             .filter(|request| request.lane_id == lane_id && !request.status.is_terminal())
-            .map(|request| request.target.clone())
-            .collect::<Vec<_>>();
+        {
+            candidates_by_target
+                .entry(candidate_target_key(&request.target))
+                .or_insert(&request.target);
+        }
         if let Some(run_id) = state.lanes.get(lane_id).and_then(|lane| lane.active_run_id)
             && let Some(run) = state.runs.get(&run_id)
         {
-            candidates.push(run.target.clone());
+            candidates_by_target
+                .entry(candidate_target_key(&run.target))
+                .or_insert(&run.target);
         }
-        candidates.sort_by(|left, right| {
-            (&left.revision, &left.components, &left.profile_digest).cmp(&(
-                &right.revision,
-                &right.components,
-                &right.profile_digest,
-            ))
-        });
-        candidates.dedup();
 
-        let requested = state
-            .requests
-            .values()
-            .filter(|request| {
-                request.lane_id == lane_id
-                    && !request.status.is_terminal()
-                    && request.target.coverage_mode == crate::domain::CoverageMode::Descendant
-            })
-            .collect::<Vec<_>>();
+        let mut requested_by_target = BTreeMap::new();
+        for request in state.requests.values().filter(|request| {
+            request.lane_id == lane_id
+                && !request.status.is_terminal()
+                && request.target.coverage_mode == crate::domain::CoverageMode::Descendant
+        }) {
+            requested_by_target
+                .entry(candidate_target_key(&request.target))
+                .or_insert(&request.target);
+        }
         let mut queries = std::collections::BTreeSet::new();
-        for candidate in &candidates {
-            for request in &requested {
-                let target = &request.target;
+        for candidate in candidates_by_target.values() {
+            for target in requested_by_target.values() {
                 if candidate.revision == target.revision
                     || candidate.repository_id != target.repository_id
                     || candidate.release_line_id != target.release_line_id
@@ -1028,7 +1069,9 @@ impl Engine {
                 }
                 run.executor_ref = Some(received);
                 run.state = RunState::Running;
-                run.phase_started_at = now;
+                if run.phase != Phase::Deploying {
+                    run.phase_started_at = now;
+                }
                 run.updated_at = now;
                 state.runs.insert(run_id, run.clone());
                 clear_unknown_block(state, &run.lane_id);
@@ -1790,8 +1833,24 @@ fn choose_candidate_batch(
     lane: &Lane,
     coverage: &CoverageContext,
 ) -> Option<CandidateBatch> {
-    let mut batches = Vec::new();
+    // Multiple requests can name the same immutable target. They have exactly
+    // the same coverage set, so only the best-ordered request for that target
+    // can affect the candidate tie-break. Keeping one representative avoids
+    // rebuilding the same (potentially large) waiter vector once per duplicate.
+    let mut candidates_by_target = BTreeMap::<_, &ReleaseRequest>::new();
     for candidate in candidates {
+        candidates_by_target
+            .entry(candidate_target_key(&candidate.target))
+            .and_modify(|current| {
+                if request_order_key(candidate) < request_order_key(current) {
+                    *current = candidate;
+                }
+            })
+            .or_insert(candidate);
+    }
+
+    let mut best_batch: Option<CandidateBatch> = None;
+    for candidate in candidates_by_target.values() {
         let mut requests = candidates
             .iter()
             .filter(|request| {
@@ -1816,15 +1875,45 @@ fn choose_candidate_batch(
             .map(|request| request.priority)
             .max()
             .unwrap_or(candidate.priority);
-        batches.push(CandidateBatch {
-            candidate: candidate.clone(),
+        let batch = CandidateBatch {
+            candidate: (**candidate).clone(),
             requests,
             anchor,
             effective_priority,
-        });
+        };
+        if best_batch
+            .as_ref()
+            .is_none_or(|best| candidate_batch_order_key(&batch) < candidate_batch_order_key(best))
+        {
+            best_batch = Some(batch);
+        }
     }
-    batches.sort_by_key(candidate_batch_order_key);
-    batches.into_iter().next()
+    best_batch
+}
+
+type CandidateTargetKey<'a> = (
+    &'a str,
+    &'a str,
+    &'a std::collections::BTreeSet<String>,
+    &'a str,
+    &'a str,
+    u64,
+    u8,
+);
+
+fn candidate_target_key(target: &Target) -> CandidateTargetKey<'_> {
+    (
+        &target.repository_id,
+        &target.revision,
+        &target.components,
+        &target.profile_digest,
+        &target.release_line_id,
+        target.config_version,
+        match &target.coverage_mode {
+            crate::domain::CoverageMode::Exact => 0,
+            crate::domain::CoverageMode::Descendant => 1,
+        },
+    )
 }
 
 type RequestOrderKey = (Reverse<Priority>, DateTime<Utc>, u64, Uuid);
@@ -2786,6 +2875,125 @@ mod tests {
     }
 
     #[test]
+    fn duplicate_targets_keep_deterministic_candidate_and_waiter_order() {
+        const DUPLICATE_COUNT: usize = 256;
+
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut state = setup(&engine, "lane-a");
+        let old = "a".repeat(40);
+        let covering = "b".repeat(40);
+        let mut duplicate_ids = Vec::with_capacity(DUPLICATE_COUNT);
+
+        for index in 0..DUPLICATE_COUNT {
+            let priority = if index == 1 || index == 47 {
+                Priority::Urgent
+            } else {
+                Priority::Normal
+            };
+            let request_id = submit(
+                &mut state,
+                &engine,
+                10_000 + index as u128,
+                "lane-a",
+                &old,
+                &["app"],
+                CoverageMode::Descendant,
+                priority,
+                1,
+                &CoverageContext::default(),
+            );
+            let deadline = match index {
+                1 => 9,
+                47 => 3,
+                _ => 100 + index as i64,
+            };
+            state.requests.get_mut(&request_id).unwrap().deadline_at = Some(time(deadline));
+            duplicate_ids.push(request_id);
+        }
+
+        let covering_id = submit(
+            &mut state,
+            &engine,
+            20_000,
+            "lane-a",
+            &covering,
+            &["app", "worker"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            &CoverageContext::default(),
+        );
+        let proofs = context(&[(&covering, &old, LineageRelation::Ancestor)]);
+        let lane = state.lanes.get("lane-a").unwrap();
+
+        let duplicate_only = state
+            .requests
+            .values()
+            .filter(|request| request.id != covering_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        let duplicate_batch = super::choose_candidate_batch(&duplicate_only, lane, &proofs)
+            .expect("duplicate target group has a candidate");
+        assert_eq!(duplicate_batch.candidate.id, duplicate_ids[47]);
+        assert_eq!(duplicate_batch.anchor.id, duplicate_ids[47]);
+        assert_eq!(duplicate_batch.effective_priority, Priority::Urgent);
+        assert_eq!(duplicate_batch.requests.len(), DUPLICATE_COUNT);
+
+        let queries = engine.coverage_queries(&state, "lane-a");
+        assert_eq!(queries.len(), 1);
+        assert_eq!(queries[0].candidate_revision, covering);
+        assert_eq!(queries[0].requested_revision, old);
+
+        let queued = state.requests.values().cloned().collect::<Vec<_>>();
+        let batch = super::choose_candidate_batch(&queued, lane, &proofs)
+            .expect("covering target has a candidate batch");
+        assert_eq!(batch.candidate.id, covering_id);
+        assert_eq!(batch.anchor.id, duplicate_ids[47]);
+        assert_eq!(batch.effective_priority, Priority::Urgent);
+
+        let mut expected = vec![duplicate_ids[47], duplicate_ids[1]];
+        expected.extend(
+            (0..DUPLICATE_COUNT)
+                .filter(|index| *index != 1 && *index != 47)
+                .map(|index| duplicate_ids[index]),
+        );
+        expected.push(covering_id);
+        assert_eq!(
+            batch
+                .requests
+                .iter()
+                .map(|request| request.id)
+                .collect::<Vec<_>>(),
+            expected
+        );
+
+        let outcome = engine
+            .reconcile(
+                &mut state,
+                "lane-a",
+                time(2),
+                ReconcileIds {
+                    run_id: ids(30_000),
+                    command_id: ids(30_001),
+                },
+                &proofs,
+            )
+            .unwrap();
+        assert_eq!(
+            outcome,
+            ReconcileOutcome::Dispatched {
+                run_id: ids(30_000),
+                command_id: ids(30_001),
+                attached_requests: expected,
+            }
+        );
+        assert_eq!(state.runs[&ids(30_000)].target.revision, covering);
+    }
+
+    #[test]
     fn queued_exact_request_is_not_coalesced_into_a_descendant_candidate() {
         let engine = Engine::new(EngineConfig {
             coalesce_window: Duration::seconds(2),
@@ -3300,6 +3508,143 @@ mod tests {
         assert_eq!(no_preempt, ReconcileOutcome::Idle);
         assert_eq!(state.runs[&run_id].phase, Phase::Deploying);
         assert_eq!(state.runs[&run_id].state, RunState::Running);
+    }
+
+    #[test]
+    fn external_dispatch_is_generation_fenced_and_last_waiter_cannot_cancel_it() {
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut state = setup(&engine, "lane-a");
+        let revision = "a".repeat(40);
+        let request_id = submit(
+            &mut state,
+            &engine,
+            1,
+            "lane-a",
+            &revision,
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            &CoverageContext::default(),
+        );
+        let run_id = dispatched_run(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(2),
+                    ReconcileIds {
+                        run_id: ids(100),
+                        command_id: ids(101),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+        );
+
+        let event_count = state.events.len();
+        assert_eq!(
+            engine.begin_external_dispatch(&mut state, run_id, 2, time(3)),
+            Err(crate::domain::DomainError::StaleGeneration)
+        );
+        assert_eq!(state.events.len(), event_count);
+        assert_eq!(state.runs[&run_id].state, RunState::Dispatching);
+        assert_eq!(state.runs[&run_id].phase, Phase::Preparing);
+
+        engine
+            .begin_external_dispatch(&mut state, run_id, 1, time(3))
+            .unwrap();
+        let admitted_event_count = state.events.len();
+        assert_eq!(state.runs[&run_id].state, RunState::Dispatching);
+        assert_eq!(state.runs[&run_id].phase, Phase::Deploying);
+        assert_eq!(state.runs[&run_id].phase_started_at, time(3));
+        assert_eq!(state.runs[&run_id].updated_at, time(3));
+        assert_eq!(state.runs[&run_id].executor_ref, None);
+        assert_eq!(
+            state.commands[&ids(101)].delivery_state,
+            crate::domain::CommandDeliveryState::Pending
+        );
+        assert_eq!(
+            state.events.last().map(|event| event.kind.as_str()),
+            Some("external_dispatch_admitted")
+        );
+        assert_eq!(state.events.last().unwrap().run_id, Some(run_id));
+
+        // Retrying the admission before the external call is idempotent and
+        // cannot reset the duration clock or append another event.
+        engine
+            .begin_external_dispatch(&mut state, run_id, 1, time(4))
+            .unwrap();
+        assert_eq!(state.runs[&run_id].phase_started_at, time(3));
+        assert_eq!(state.events.len(), admitted_event_count);
+
+        engine
+            .withdraw(&mut state, request_id, "caller-1", time(5))
+            .unwrap();
+        assert_eq!(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(6),
+                    ReconcileIds {
+                        run_id: ids(200),
+                        command_id: ids(201),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+            ReconcileOutcome::Idle
+        );
+        assert_eq!(state.lanes["lane-a"].active_run_id, Some(run_id));
+        assert_eq!(state.runs[&run_id].state, RunState::Dispatching);
+        assert_eq!(state.runs[&run_id].phase, Phase::Deploying);
+        assert!(!state.commands.values().any(|command| {
+            command.run_id == run_id && command.kind == crate::domain::CommandKind::Cancel
+        }));
+
+        // A later start acknowledgement completes dispatch without resetting
+        // the clock for the already admitted non-preemptible phase.
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "external-hook",
+                ExecutorResult::Started {
+                    executor_ref: "external-hook".to_owned(),
+                },
+                time(7),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert_eq!(state.runs[&run_id].state, RunState::Running);
+        assert_eq!(state.runs[&run_id].phase, Phase::Deploying);
+        assert_eq!(state.runs[&run_id].phase_started_at, time(3));
+        assert_eq!(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(8),
+                    ReconcileIds {
+                        run_id: ids(202),
+                        command_id: ids(203),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+            ReconcileOutcome::Idle
+        );
+        assert_eq!(state.lanes["lane-a"].active_run_id, Some(run_id));
+        assert_eq!(state.runs[&run_id].state, RunState::Running);
+        assert_eq!(state.runs[&run_id].phase, Phase::Deploying);
+        assert!(!state.commands.values().any(|command| {
+            command.run_id == run_id && command.kind == crate::domain::CommandKind::Cancel
+        }));
     }
 
     #[test]

@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     api::{self, ExecutorEventKind, ResolveAction},
-    config::{Config, ResolvedToken},
+    config::{Config, HookConfig, LaneExecutorConfig, ResolvedToken},
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, CoverageMode, DomainError,
         ExecutorResult, Lane, Phase, Priority, ReconcileIds, RequestStatus, RunState, State,
@@ -28,6 +28,7 @@ use crate::{
     },
     engine::{Engine, EngineConfig},
     executor::{Executor, ScriptedExecutor},
+    hooks::{HookCall, HookEnvelope, HookExecutor, HookOperation, HookReply, HookStatus},
     lineage::{CoverageContext, CoverageQuery, LineageResolver, is_full_revision},
     store::Store,
 };
@@ -64,6 +65,7 @@ pub struct Service {
     engine: Engine,
     lineage: LineageResolver,
     executor: ScriptedExecutor,
+    lane_executors: BTreeMap<String, LaneExecutorConfig>,
     _database_lock: DatabaseLock,
     ready: AtomicBool,
 }
@@ -109,6 +111,7 @@ impl Service {
         let now = Utc::now();
         for lane_config in &config.lanes {
             let release_line_id = release_line_id(lane_config);
+            let effective_profile_digest = config.effective_profile_digest(lane_config)?;
             let current = state.lanes.get(&lane_config.id);
             let mut lane = Lane {
                 id: lane_config.id.clone(),
@@ -118,10 +121,11 @@ impl Service {
                 repository_id: lane_config.repository_id.clone(),
                 release_ref: lane_config.release_ref.clone(),
                 release_line_id,
-                profile_digest: lane_config.profile_digest.clone(),
+                profile_digest: effective_profile_digest,
                 config_version: current.map_or(1, |lane| lane.config_version),
                 descendant_coverage_enabled: lane_config.allow_descendant,
-                preemption_enabled: lane_config.allow_preemption,
+                preemption_enabled: lane_config.allow_preemption
+                    && matches!(&lane_config.executor, LaneExecutorConfig::Scripted),
                 allowed_revisions: BTreeSet::new(),
                 allowed_components: lane_config.components.iter().cloned().collect(),
                 active_run_id: None,
@@ -170,6 +174,12 @@ impl Service {
             if run.state == RunState::Unknown {
                 continue;
             }
+            let lane_profile_changed = recovered.lanes.get(&run.lane_id).is_none_or(|lane| {
+                lane.profile_digest != run.target.profile_digest
+                    || lane.repository_id != run.target.repository_id
+                    || lane.release_line_id != run.target.release_line_id
+            });
+            let executor_unconfigured = !config.lanes.iter().any(|lane| lane.id == run.lane_id);
             let unresolved_delivery = recovered.commands.values().any(|command| {
                 command.run_id == run.id
                     && command.generation == run.generation
@@ -179,12 +189,16 @@ impl Service {
                         CommandDeliveryState::Delivered | CommandDeliveryState::Unknown
                     )
             });
-            if unresolved_delivery {
+            if lane_profile_changed || executor_unconfigured || unresolved_delivery {
                 engine.mark_unknown(
                     &mut recovered,
                     run.id,
                     run.generation,
-                    "service restarted after command delivery without a durable operation result",
+                    if lane_profile_changed || executor_unconfigured {
+                        "active run does not match the configured execution profile; restore its original configuration before observing"
+                    } else {
+                        "service restarted after command delivery without a durable operation result"
+                    },
                     now,
                 )?;
             }
@@ -204,6 +218,11 @@ impl Service {
             engine,
             lineage,
             executor: ScriptedExecutor::new(Duration::from_millis(config.scripted_phase_ms)),
+            lane_executors: config
+                .lanes
+                .iter()
+                .map(|lane| (lane.id.clone(), lane.executor.clone()))
+                .collect(),
             _database_lock: database_lock,
             ready: AtomicBool::new(true),
         });
@@ -212,6 +231,33 @@ impl Service {
 
     pub fn tokens(&self) -> &[ResolvedToken] {
         &self.tokens
+    }
+
+    pub fn executor_kind(&self, lane_id: &str) -> &'static str {
+        self.lane_executors
+            .get(lane_id)
+            .map_or("unconfigured", LaneExecutorConfig::kind)
+    }
+
+    pub fn executor_mix(&self) -> String {
+        let mut kinds = self
+            .lane_executors
+            .values()
+            .map(LaneExecutorConfig::kind)
+            .collect::<BTreeSet<_>>();
+        match kinds.len() {
+            0 => "scripted".to_owned(),
+            1 => kinds.pop_first().unwrap_or("scripted").to_owned(),
+            _ => "mixed".to_owned(),
+        }
+    }
+
+    pub fn dashboard_dir(&self) -> Option<&Path> {
+        self.config.dashboard_dir.as_deref()
+    }
+
+    fn lane_executor(&self, lane_id: &str) -> Option<&LaneExecutorConfig> {
+        self.lane_executors.get(lane_id)
     }
 
     pub async fn snapshot(&self) -> State {
@@ -394,6 +440,9 @@ impl Service {
         next_phase: Phase,
         executor_ref: String,
     ) -> Result<(), ServiceError> {
+        if self.executor_kind_for_run(run_id).await != Some("scripted") {
+            return Err(DomainError::InvalidTransition.into());
+        }
         self.transact(None, |engine, state, _| {
             let previous_phase = state.runs.get(&run_id).map(|run| run.phase.clone());
             engine.phase_grant(
@@ -433,6 +482,9 @@ impl Service {
                 .get(&run_id)
                 .cloned()
                 .ok_or(DomainError::RunNotFound)?;
+            if self.executor_kind(&run.lane_id) != "scripted" {
+                return Err(DomainError::InvalidTransition.into());
+            }
             let command = state
                 .commands
                 .values()
@@ -583,6 +635,14 @@ impl Service {
         if run.state != RunState::Unknown {
             return Err(DomainError::InvalidTransition.into());
         }
+        if self.executor_kind(&lane_id) == "unconfigured" {
+            return Err(ServiceError::UnprovenExecutorState);
+        }
+        if self.executor_kind(&lane_id) == "hooks" {
+            return self
+                .resolve_unknown_hook(&snapshot, &lane, &run, action, evidence_note, reason)
+                .await;
+        }
         let observation = self.executor.observe(&snapshot, &run);
         let observation_digest = hex::encode(Sha256::digest(
             format!(
@@ -658,6 +718,7 @@ impl Service {
         }
         self.advance_running_phases().await?;
         self.reconcile_lanes().await?;
+        self.poll_hook_runs().await?;
         self.process_pending_commands().await?;
         self.check_cancel_timeouts().await?;
         Ok(())
@@ -800,7 +861,9 @@ impl Service {
         let runs = snapshot
             .runs
             .values()
-            .filter(|run| run.state == RunState::Running)
+            .filter(|run| {
+                run.state == RunState::Running && self.executor_kind(&run.lane_id) == "scripted"
+            })
             .cloned()
             .collect::<Vec<_>>();
         for run in runs {
@@ -869,6 +932,28 @@ impl Service {
         let Some(run) = before.runs.get(&command.run_id).cloned() else {
             return Ok(());
         };
+        let configured_kind = self.executor_kind(&run.lane_id);
+        let profile_matches = before.lanes.get(&run.lane_id).is_some_and(|lane| {
+            lane.profile_digest == run.target.profile_digest
+                && lane.repository_id == run.target.repository_id
+                && lane.release_line_id == run.target.release_line_id
+        });
+        if configured_kind == "unconfigured" || !profile_matches {
+            let now = Utc::now();
+            self.transact(Some(&run.lane_id), |engine, state, _| {
+                engine.command_delivery(
+                    state,
+                    command.id,
+                    CommandDelivery::Unknown {
+                        reason: "active run does not match its configured executor profile".into(),
+                    },
+                    now,
+                )?;
+                Ok(())
+            })
+            .await?;
+            return Ok(());
+        }
         let active = before.lanes.get(&run.lane_id).is_some_and(|lane| {
             lane.active_run_id == Some(run.id) && lane.generation == run.generation
         });
@@ -897,6 +982,9 @@ impl Service {
             })
             .await?;
             return Ok(());
+        }
+        if self.executor_kind(&run.lane_id) == "hooks" {
+            return self.process_hook_command(command, before, run).await;
         }
         let now = Utc::now();
         self.transact(None, |engine, state, _| {
@@ -1077,6 +1165,706 @@ impl Service {
                     }
                 }
                 Ok(())
+        })
+        .await
+    }
+
+    async fn process_hook_command(
+        &self,
+        command: Command,
+        mut snapshot: State,
+        mut run: crate::domain::DeliveryRun,
+    ) -> Result<(), ServiceError> {
+        if !self.hook_profile_matches(&snapshot, &run) {
+            return self
+                .mark_hook_operation_unknown(
+                    &run,
+                    Some(command.id),
+                    "configured hook profile changed while this run was active",
+                )
+                .await;
+        }
+        let operation = match &command.kind {
+            CommandKind::Dispatch => HookOperation::Dispatch,
+            CommandKind::Verify => HookOperation::Verify,
+            CommandKind::Cancel | CommandKind::Observe => {
+                return self
+                    .mark_hook_operation_unknown(
+                        &run,
+                        Some(command.id),
+                        "hook lanes do not support cancel or command-driven observe",
+                    )
+                    .await;
+            }
+        };
+        if operation == HookOperation::Dispatch {
+            self.transact(None, |engine, state, _| {
+                engine.begin_external_dispatch(state, run.id, run.generation, Utc::now())?;
+                Ok(())
+            })
+            .await?;
+            snapshot = self.snapshot().await;
+            run = snapshot
+                .runs
+                .get(&run.id)
+                .cloned()
+                .ok_or(DomainError::RunNotFound)?;
+        }
+        // The durable external-dispatch phase is committed above before the
+        // delivery marker and before any configured hook can cause effects.
+        let now = Utc::now();
+        self.transact(None, |engine, state, _| {
+            engine.command_delivery(state, command.id, CommandDelivery::Delivered, now)?;
+            Ok(())
+        })
+        .await?;
+        let snapshot = self.snapshot().await;
+        let run = snapshot
+            .runs
+            .get(&run.id)
+            .cloned()
+            .ok_or(DomainError::RunNotFound)?;
+        let lane = snapshot
+            .lanes
+            .get(&run.lane_id)
+            .cloned()
+            .ok_or_else(|| DomainError::LaneNotFound(run.lane_id.clone()))?;
+        let config = self
+            .hook_config(&run.lane_id, operation)
+            .ok_or_else(|| anyhow::anyhow!("hook operation is not configured"))?;
+        let envelope = HookEnvelope {
+            version: 1,
+            operation,
+            command: Some(&command),
+            run: &run,
+            lane: &lane,
+        };
+        match HookExecutor::call(&config, &envelope).await {
+            Ok(HookCall::Accepted) => Ok(()),
+            Ok(HookCall::Reply(reply)) => {
+                self.apply_hook_reply(operation, Some(&command), &run, *reply)
+                    .await
+            }
+            Err(error) => {
+                self.mark_hook_operation_unknown(
+                    &run,
+                    Some(command.id),
+                    &format!("configured hook result is unproven: {error}"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn poll_hook_runs(&self) -> Result<(), ServiceError> {
+        let _executor = self.executor_gate.lock().await;
+        let snapshot = self.snapshot().await;
+        let active = snapshot
+            .runs
+            .values()
+            .filter(|run| {
+                run.state.owns_execution_slot() && self.executor_kind(&run.lane_id) == "hooks"
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        for run in active {
+            let state = self.snapshot().await;
+            let Some(current) = state.runs.get(&run.id).cloned() else {
+                continue;
+            };
+            let Some(lane) = state.lanes.get(&current.lane_id).cloned() else {
+                continue;
+            };
+            if current.state == RunState::Dispatching
+                && state.commands.values().any(|command| {
+                    command.run_id == current.id
+                        && command.generation == current.generation
+                        && command.kind == CommandKind::Dispatch
+                        && command.delivery_state == CommandDeliveryState::Pending
+                })
+            {
+                continue;
+            }
+            if !self.hook_profile_matches(&state, &current) {
+                self.mark_hook_operation_unknown(
+                    &current,
+                    None,
+                    "configured hook profile changed while this run was active",
+                )
+                .await?;
+                continue;
+            }
+            let Some(config) = self.hook_config(&current.lane_id, HookOperation::Observe) else {
+                self.mark_hook_operation_unknown(
+                    &current,
+                    None,
+                    "observe hook is not configured for the active run",
+                )
+                .await?;
+                continue;
+            };
+            let envelope = HookEnvelope {
+                version: 1,
+                operation: HookOperation::Observe,
+                command: None,
+                run: &current,
+                lane: &lane,
+            };
+            match HookExecutor::call(&config, &envelope).await {
+                Ok(HookCall::Accepted) => {}
+                Ok(HookCall::Reply(reply)) => {
+                    let completed = reply.status == HookStatus::Completed;
+                    self.apply_hook_reply(HookOperation::Observe, None, &current, *reply)
+                        .await?;
+                    if completed {
+                        self.retry_delivered_verification(current.id).await?;
+                    }
+                }
+                Err(error) => {
+                    self.mark_hook_operation_unknown(
+                        &current,
+                        None,
+                        &format!("hook observation is unproven: {error}"),
+                    )
+                    .await?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    async fn retry_delivered_verification(&self, run_id: Uuid) -> Result<(), ServiceError> {
+        let snapshot = self.snapshot().await;
+        let Some(run) = snapshot.runs.get(&run_id).cloned() else {
+            return Ok(());
+        };
+        if run.state != RunState::Running || run.phase != Phase::Verifying {
+            return Ok(());
+        }
+        let command = snapshot
+            .commands
+            .values()
+            .filter(|command| {
+                command.run_id == run.id
+                    && command.generation == run.generation
+                    && command.kind == CommandKind::Verify
+            })
+            .max_by_key(|command| command.created_at)
+            .cloned();
+        let Some(command) = command else {
+            return Ok(());
+        };
+        if matches!(
+            command.delivery_state,
+            CommandDeliveryState::Pending | CommandDeliveryState::Acknowledged
+        ) {
+            return Ok(());
+        }
+        // Verify is an independent read-only evidence check. A delivered or
+        // unknown verification may be repeated after a fresh completed
+        // observation; dispatch is never replayed.
+        let lane = snapshot
+            .lanes
+            .get(&run.lane_id)
+            .cloned()
+            .ok_or_else(|| DomainError::LaneNotFound(run.lane_id.clone()))?;
+        let config = self
+            .hook_config(&run.lane_id, HookOperation::Verify)
+            .ok_or_else(|| anyhow::anyhow!("verify hook is not configured"))?;
+        let envelope = HookEnvelope {
+            version: 1,
+            operation: HookOperation::Verify,
+            command: Some(&command),
+            run: &run,
+            lane: &lane,
+        };
+        match HookExecutor::call(&config, &envelope).await {
+            Ok(HookCall::Accepted) => Ok(()),
+            Ok(HookCall::Reply(reply)) => {
+                self.apply_hook_reply(HookOperation::Verify, Some(&command), &run, *reply)
+                    .await
+            }
+            Err(error) => {
+                self.mark_hook_operation_unknown(
+                    &run,
+                    Some(command.id),
+                    &format!("fresh verification is unproven: {error}"),
+                )
+                .await
+            }
+        }
+    }
+
+    async fn apply_hook_reply(
+        &self,
+        operation: HookOperation,
+        command: Option<&Command>,
+        observed_run: &crate::domain::DeliveryRun,
+        reply: HookReply,
+    ) -> Result<(), ServiceError> {
+        let run_id = observed_run.id;
+        let now = Utc::now();
+        let reply_digest = hex::encode(Sha256::digest(
+            serde_json::to_vec(&reply).unwrap_or_else(|_| b"invalid-hook-reply".to_vec()),
+        ));
+        self.transact(Some(&observed_run.lane_id), |engine, state, coverage| {
+            let run = state
+                .runs
+                .get(&run_id)
+                .cloned()
+                .ok_or(DomainError::RunNotFound)?;
+            if run.generation != reply.generation
+                || run.id != reply.run_id
+                || state.lanes.get(&run.lane_id).is_none_or(|lane| {
+                    run.target.profile_digest != lane.profile_digest
+                        || run.target.repository_id != lane.repository_id
+                        || run.target.release_line_id != lane.release_line_id
+                })
+            {
+                if run.state != RunState::Unknown {
+                    engine.mark_unknown(
+                        state,
+                        run.id,
+                        run.generation,
+                        "hook reply profile or generation no longer matches the active lane",
+                        now,
+                    )?;
+                }
+                return Ok(());
+            }
+            let supplied_ref = reply.executor_ref.as_deref();
+            if let Some(expected) = run.executor_ref.as_deref()
+                && supplied_ref.is_some_and(|value| value != expected)
+            {
+                engine.mark_unknown(
+                    state,
+                    run.id,
+                    run.generation,
+                    "hook reply changed the stable executor reference",
+                    now,
+                )?;
+                if let Some(command) = command {
+                    engine.command_delivery(
+                        state,
+                        command.id,
+                        CommandDelivery::Unknown {
+                            reason: "hook executor reference mismatch".into(),
+                        },
+                        now,
+                    )?;
+                }
+                return Ok(());
+            }
+            store_hook_logs(
+                engine,
+                state,
+                run.id,
+                supplied_ref.unwrap_or("unassigned"),
+                &reply.logs,
+                now,
+            )?;
+
+            let executor_ref = supplied_ref
+                .map(str::to_owned)
+                .or_else(|| run.executor_ref.clone())
+                .unwrap_or_else(|| format!("hook:{}:{}", run.id, run.generation));
+            if matches!(operation, HookOperation::Dispatch | HookOperation::Observe)
+                && let Some(dispatch) =
+                    command.filter(|command| command.kind == CommandKind::Dispatch)
+            {
+                engine.command_delivery(state, dispatch.id, CommandDelivery::Acknowledged, now)?;
+            } else if operation == HookOperation::Observe
+                && let Some(dispatch) = state
+                    .commands
+                    .values()
+                    .filter(|command| {
+                        command.run_id == run.id
+                            && command.generation == run.generation
+                            && command.kind == CommandKind::Dispatch
+                    })
+                    .max_by_key(|command| command.created_at)
+                    .cloned()
+                && dispatch.delivery_state != CommandDeliveryState::Acknowledged
+            {
+                engine.command_delivery(state, dispatch.id, CommandDelivery::Acknowledged, now)?;
+            }
+
+            match reply.status {
+                HookStatus::Started | HookStatus::Running => {
+                    if operation == HookOperation::Verify || supplied_ref.is_none() {
+                        engine.mark_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            "hook active-state reply omitted its stable executor reference",
+                            now,
+                        )?;
+                    } else if run.state == RunState::Unknown {
+                        engine.resolve_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            UnknownResolution::KnownRunning {
+                                executor_ref: executor_ref.clone(),
+                                evidence_digest: reply_digest.clone(),
+                            },
+                            Uuid::new_v4(),
+                            now,
+                            coverage,
+                        )?;
+                    } else if run.state == RunState::Dispatching {
+                        engine.executor_result(
+                            state,
+                            run.id,
+                            run.generation,
+                            &executor_ref,
+                            ExecutorResult::Started {
+                                executor_ref: executor_ref.clone(),
+                            },
+                            now,
+                            coverage,
+                        )?;
+                    }
+                }
+                HookStatus::Completed => {
+                    if operation == HookOperation::Verify || supplied_ref.is_none() {
+                        engine.mark_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            "hook completion reply omitted its stable executor reference",
+                            now,
+                        )?;
+                    } else {
+                        if run.state == RunState::Unknown {
+                            engine.resolve_unknown(
+                                state,
+                                run.id,
+                                run.generation,
+                                UnknownResolution::KnownRunning {
+                                    executor_ref: executor_ref.clone(),
+                                    evidence_digest: reply_digest.clone(),
+                                },
+                                Uuid::new_v4(),
+                                now,
+                                coverage,
+                            )?;
+                        } else if run.state == RunState::Dispatching {
+                            engine.executor_result(
+                                state,
+                                run.id,
+                                run.generation,
+                                &executor_ref,
+                                ExecutorResult::Started {
+                                    executor_ref: executor_ref.clone(),
+                                },
+                                now,
+                                coverage,
+                            )?;
+                        }
+                        advance_hook_to_verifying(
+                            engine,
+                            state,
+                            run.id,
+                            run.generation,
+                            &executor_ref,
+                            now,
+                        )?;
+                        engine.request_verification(
+                            state,
+                            run.id,
+                            run.generation,
+                            Uuid::new_v4(),
+                            now,
+                        )?;
+                    }
+                }
+                HookStatus::Failed => {
+                    if operation == HookOperation::Verify {
+                        if let Some(command) = command {
+                            engine.command_delivery(
+                                state,
+                                command.id,
+                                CommandDelivery::Unknown {
+                                    reason:
+                                        "verification hook failed to produce independent evidence"
+                                            .into(),
+                                },
+                                now,
+                            )?;
+                        } else if run.state != RunState::Unknown {
+                            engine.mark_unknown(
+                                state,
+                                run.id,
+                                run.generation,
+                                "verification hook failed to produce independent evidence",
+                                now,
+                            )?;
+                        }
+                    } else {
+                        engine.executor_result(
+                            state,
+                            run.id,
+                            run.generation,
+                            &executor_ref,
+                            ExecutorResult::Failed {
+                                message: bounded_text(
+                                    reply.message.as_deref().unwrap_or("hook failed"),
+                                    2048,
+                                ),
+                                environment_known_unchanged: reply.environment_known_unchanged
+                                    == Some(true),
+                            },
+                            now,
+                            coverage,
+                        )?;
+                    }
+                }
+                HookStatus::Unknown => {
+                    if operation == HookOperation::Verify
+                        && let Some(command) = command
+                    {
+                        engine.command_delivery(
+                            state,
+                            command.id,
+                            CommandDelivery::Unknown {
+                                reason: "verification hook did not prove a receipt".into(),
+                            },
+                            now,
+                        )?;
+                    } else if run.state != RunState::Unknown {
+                        engine.mark_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            &bounded_text(
+                                reply
+                                    .message
+                                    .as_deref()
+                                    .unwrap_or("hook observation is unknown"),
+                                1024,
+                            ),
+                            now,
+                        )?;
+                    }
+                }
+                HookStatus::Verified => {
+                    let Some(receipt) = reply.receipt.clone() else {
+                        engine.mark_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            "verify hook omitted receipt",
+                            now,
+                        )?;
+                        return Ok(());
+                    };
+                    let Some(command) =
+                        command.filter(|command| command.kind == CommandKind::Verify)
+                    else {
+                        engine.mark_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            "verified reply had no durable verify command",
+                            now,
+                        )?;
+                        return Ok(());
+                    };
+                    engine.command_delivery(
+                        state,
+                        command.id,
+                        CommandDelivery::Acknowledged,
+                        now,
+                    )?;
+                    if run.state == RunState::Unknown {
+                        engine.resolve_unknown(
+                            state,
+                            run.id,
+                            run.generation,
+                            UnknownResolution::VerifiedReceipt {
+                                receipt,
+                                evidence_digest: reply_digest,
+                            },
+                            Uuid::new_v4(),
+                            now,
+                            coverage,
+                        )?;
+                    } else {
+                        engine.executor_result(
+                            state,
+                            run.id,
+                            run.generation,
+                            &executor_ref,
+                            ExecutorResult::VerifiedReceipt(receipt),
+                            now,
+                            coverage,
+                        )?;
+                    }
+                }
+            }
+            if let Some(message) = reply
+                .message
+                .as_deref()
+                .filter(|message| !message.is_empty())
+            {
+                let level = if reply.status == HookStatus::Failed {
+                    "error"
+                } else {
+                    "info"
+                };
+                let _ = engine.record_executor_log(
+                    state,
+                    run.id,
+                    level,
+                    &bounded_text(message, 1024),
+                    now,
+                );
+            }
+            Ok(())
+        })
+        .await
+    }
+
+    async fn mark_hook_operation_unknown(
+        &self,
+        run: &crate::domain::DeliveryRun,
+        command_id: Option<Uuid>,
+        reason: &str,
+    ) -> Result<(), ServiceError> {
+        let reason = bounded_text(reason, 1024);
+        let now = Utc::now();
+        self.transact(Some(&run.lane_id), |engine, state, _| {
+            if let Some(command_id) = command_id
+                && state.commands.get(&command_id).is_some_and(|command| {
+                    command.delivery_state != CommandDeliveryState::Acknowledged
+                })
+            {
+                engine.command_delivery(
+                    state,
+                    command_id,
+                    CommandDelivery::Unknown {
+                        reason: reason.clone(),
+                    },
+                    now,
+                )?;
+            } else if state
+                .runs
+                .get(&run.id)
+                .is_some_and(|current| current.state != RunState::Unknown)
+            {
+                engine.mark_unknown(state, run.id, run.generation, &reason, now)?;
+            }
+            let _ = engine.record_executor_log(state, run.id, "warn", &reason, now);
+            Ok(())
+        })
+        .await
+    }
+
+    fn hook_config(&self, lane_id: &str, operation: HookOperation) -> Option<HookConfig> {
+        let (dispatch, observe, verify) = self.lane_executor(lane_id)?.hooks()?;
+        Some(match operation {
+            HookOperation::Dispatch => dispatch.clone(),
+            HookOperation::Observe => observe.clone(),
+            HookOperation::Verify => verify.clone(),
+        })
+    }
+
+    fn hook_profile_matches(&self, state: &State, run: &crate::domain::DeliveryRun) -> bool {
+        self.executor_kind(&run.lane_id) == "hooks"
+            && state.lanes.get(&run.lane_id).is_some_and(|lane| {
+                lane.profile_digest == run.target.profile_digest
+                    && lane.repository_id == run.target.repository_id
+                    && lane.release_line_id == run.target.release_line_id
+            })
+    }
+
+    async fn executor_kind_for_run(&self, run_id: Uuid) -> Option<&'static str> {
+        let snapshot = self.snapshot().await;
+        let run = snapshot.runs.get(&run_id)?;
+        Some(self.executor_kind(&run.lane_id))
+    }
+
+    async fn resolve_unknown_hook(
+        &self,
+        snapshot: &State,
+        lane: &Lane,
+        run: &crate::domain::DeliveryRun,
+        action: ResolveAction,
+        evidence_note: String,
+        reason: String,
+    ) -> Result<(), ServiceError> {
+        if !self.hook_profile_matches(snapshot, run)
+            || matches!(action, ResolveAction::ConfirmStopped)
+        {
+            return Err(ServiceError::UnprovenExecutorState);
+        }
+        let operation = if matches!(action, ResolveAction::RecordVerified) {
+            HookOperation::Verify
+        } else {
+            HookOperation::Observe
+        };
+        let config = self
+            .hook_config(&lane.id, operation)
+            .ok_or(ServiceError::UnprovenExecutorState)?;
+        let envelope = HookEnvelope {
+            version: 1,
+            operation,
+            command: None,
+            run,
+            lane,
+        };
+        let HookCall::Reply(reply) = HookExecutor::call(&config, &envelope)
+            .await
+            .map_err(|_| ServiceError::UnprovenExecutorState)?
+        else {
+            return Err(ServiceError::UnprovenExecutorState);
+        };
+        let proof = match (
+            &action,
+            reply.status,
+            reply.executor_ref.clone(),
+            reply.receipt.clone(),
+        ) {
+            (
+                ResolveAction::AdoptRunning,
+                HookStatus::Started | HookStatus::Running | HookStatus::Completed,
+                Some(executor_ref),
+                _,
+            ) => UnknownResolution::KnownRunning {
+                executor_ref,
+                evidence_digest: hook_evidence_digest(&reply),
+            },
+            (ResolveAction::RecordVerified, HookStatus::Verified, _, Some(receipt)) => {
+                UnknownResolution::VerifiedReceipt {
+                    receipt,
+                    evidence_digest: hook_evidence_digest(&reply),
+                }
+            }
+            _ => return Err(ServiceError::UnprovenExecutorState),
+        };
+        let command_id = Uuid::new_v4();
+        let now = Utc::now();
+        self.transact(Some(&lane.id), |engine, state, coverage| {
+            engine.resolve_unknown(
+                state,
+                run.id,
+                run.generation,
+                proof,
+                command_id,
+                now,
+                coverage,
+            )?;
+            let note = bounded_text(&evidence_note, 1024);
+            let reason = bounded_text(&reason, 512);
+            let _ = engine.record_executor_log(
+                state,
+                run.id,
+                "warn",
+                &format!("admin hook observation; reason={reason}; note={note}"),
+                now,
+            );
+            Ok(())
         })
         .await
     }
@@ -1267,6 +2055,68 @@ fn bounded_text(value: &str, limit: usize) -> String {
         .collect()
 }
 
+fn store_hook_logs(
+    engine: &Engine,
+    state: &mut State,
+    run_id: Uuid,
+    _executor_ref: &str,
+    logs: &[crate::hooks::HookLog],
+    now: chrono::DateTime<Utc>,
+) -> Result<(), DomainError> {
+    for log in logs {
+        let marker = format!("[hook_seq:{}]", log.sequence);
+        if state.events.iter().any(|event| {
+            event.run_id == Some(run_id)
+                && event.kind == "executor_log"
+                && event.message.contains(&marker)
+        }) {
+            continue;
+        }
+        let message = bounded_text(&log.message, 1800);
+        if message.is_empty() {
+            continue;
+        }
+        engine.record_executor_log(
+            state,
+            run_id,
+            &log.level,
+            &format!("{marker} {message}"),
+            now,
+        )?;
+    }
+    Ok(())
+}
+
+fn advance_hook_to_verifying(
+    engine: &Engine,
+    state: &mut State,
+    run_id: Uuid,
+    generation: u64,
+    executor_ref: &str,
+    now: chrono::DateTime<Utc>,
+) -> Result<(), DomainError> {
+    loop {
+        let phase = state
+            .runs
+            .get(&run_id)
+            .map(|run| run.phase.clone())
+            .ok_or(DomainError::RunNotFound)?;
+        let next = match phase {
+            Phase::Preparing => Phase::Building,
+            Phase::Building => Phase::Deploying,
+            Phase::Deploying => Phase::Verifying,
+            Phase::Verifying => return Ok(()),
+        };
+        engine.phase_grant(state, run_id, generation, executor_ref, next, now)?;
+    }
+}
+
+fn hook_evidence_digest(reply: &HookReply) -> String {
+    hex::encode(Sha256::digest(
+        serde_json::to_vec(reply).unwrap_or_else(|_| b"invalid-hook-reply".to_vec()),
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1308,15 +2158,107 @@ mod tests {
                 allow_descendant: false,
                 allow_preemption: false,
                 enabled: true,
+                executor: LaneExecutorConfig::Scripted,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
             scripted_phase_ms: 60_000,
             cancel_timeout_seconds: 30,
             coalesce_ms: 0,
+            dashboard_dir: None,
         };
         let service = Service::open(config).await.unwrap();
         (temp, service)
+    }
+
+    async fn hook_test_service() -> (tempfile::TempDir, Config, Arc<Service>, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "git init failed: {:?}", output);
+        let marker = temp.path().join("dispatch-count.txt");
+        let script = temp.path().join("hook.py");
+        std::fs::write(
+            &script,
+            r#"import datetime, json, sys, uuid
+request = json.load(sys.stdin)
+run = request['run']
+operation = request['operation']
+executor_ref = 'fixture:' + run['id']
+reply = {'version': 1, 'run_id': run['id'], 'generation': run['generation'], 'executor_ref': executor_ref, 'status': 'started', 'logs': []}
+if operation == 'dispatch':
+    with open(sys.argv[1], 'a', encoding='utf-8') as output:
+        output.write('dispatch\n')
+    reply['status'] = 'started'
+elif operation == 'observe':
+    reply['status'] = 'completed'
+elif operation == 'verify':
+    reply['status'] = 'verified'
+    reply['receipt'] = {
+        'id': str(uuid.uuid4()),
+        'run_id': run['id'],
+        'generation': run['generation'],
+        'observed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'source_revision': run['target']['revision'],
+        'component_digests': {component: 'fixture-digest' for component in run['target']['components']},
+        'profile_digest': run['target']['profile_digest'],
+        'verification_report': 'independent fixture verification',
+        'result': 'success'
+    }
+print(json.dumps(reply))
+"#,
+        )
+        .unwrap();
+        let hook = HookConfig::Script {
+            path: script,
+            interpreter: "python3".into(),
+            args: vec![marker.display().to_string()],
+            cwd: None,
+            timeout_ms: 5_000,
+        };
+        let config = Config {
+            database_path: temp.path().join("ledger.sqlite3"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "test-admin".into(),
+                token_env: "PATH".into(),
+                lanes: vec!["test-lane".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "test-lane".into(),
+                project: "test-project".into(),
+                environment: "dev".into(),
+                repository_id: "test-repository".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "profile-v1".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                enabled: true,
+                executor: LaneExecutorConfig::Hooks {
+                    dispatch: hook.clone(),
+                    observe: hook.clone(),
+                    verify: hook,
+                },
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+        };
+        let service = Service::open(config.clone()).await.unwrap();
+        (temp, config, service, marker)
     }
 
     async fn create_pending_dispatch(service: &Service) -> (Uuid, Uuid) {
@@ -1483,6 +2425,71 @@ mod tests {
                 && command.kind == CommandKind::Verify
                 && command.delivery_state == CommandDeliveryState::Pending
         }));
+    }
+
+    #[tokio::test]
+    async fn hook_restart_observes_and_reverifies_without_replaying_dispatch() {
+        let (_temp, config, service, marker) = hook_test_service().await;
+        let (run_id, dispatch_id) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+        let started = service.snapshot().await;
+        assert_eq!(started.runs[&run_id].state, RunState::Running);
+        assert_eq!(started.runs[&run_id].phase, Phase::Deploying);
+        assert_eq!(
+            started.commands[&dispatch_id].delivery_state,
+            CommandDeliveryState::Acknowledged
+        );
+
+        let run = started.runs[&run_id].clone();
+        service
+            .transact(Some("test-lane"), |engine, state, _| {
+                engine.phase_grant(
+                    state,
+                    run_id,
+                    run.generation,
+                    run.executor_ref.as_deref().unwrap(),
+                    Phase::Verifying,
+                    Utc::now(),
+                )?;
+                let verify = engine.request_verification(
+                    state,
+                    run_id,
+                    run.generation,
+                    Uuid::new_v4(),
+                    Utc::now(),
+                )?;
+                engine.command_delivery(
+                    state,
+                    verify.id,
+                    CommandDelivery::Delivered,
+                    Utc::now(),
+                )?;
+                Ok(())
+            })
+            .await
+            .unwrap();
+
+        drop(service);
+        let reopened = Service::open(config).await.unwrap();
+        reopened.scheduler_tick().await.unwrap();
+        let after = reopened.snapshot().await;
+        assert_eq!(after.runs[&run_id].state, RunState::Succeeded);
+        assert!(
+            after
+                .receipts
+                .contains_key(&after.runs[&run_id].receipt_id.unwrap())
+        );
+        let dispatches = std::fs::read_to_string(marker).unwrap();
+        assert_eq!(
+            dispatches.lines().count(),
+            1,
+            "dispatch must not replay after restart"
+        );
+        assert_eq!(
+            ScriptedExecutor::synthetic_physical_start_count(&after),
+            0,
+            "hook execution must never be represented as synthetic"
+        );
     }
     #[tokio::test]
     async fn lost_observation_after_ack_blocks_until_independent_evidence() {
