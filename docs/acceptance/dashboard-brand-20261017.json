@@ -1,0 +1,41 @@
+{
+  "recorded_at": "2026-10-17T02:03:53.158015+08:00",
+  "source_commit": "5b77ce32c19d7b4b0b238b4de2c6fdfcc300e15d",
+  "scope": "Dashboard brand assets only; no release requests or executor changes",
+  "real_deployments_submitted": 0,
+  "status": "passed",
+  "unit": "auto-deliver.service",
+  "previous_dashboard_dir": "/home/yahui/.local/share/auto-deliver/dashboard-releases/ebef028c3663-53685d921f22/web",
+  "dashboard_dir": "/home/yahui/.local/share/auto-deliver/dashboard-releases/5b77ce32c19d-2728f445a688/web",
+  "asset_digest": "2728f445a688b38e2b374b4407825de94f2b72544e1f7e6bf5d7e52a2ada2eaf",
+  "favicon": "/assets/shipbraid-logo-DrDvCjAP.png",
+  "favicon_sha256": "7fc28e7427a0313acd193ee32566d5271a9caa78c1050b00519acd47af4a2f23",
+  "ui_name": "Shipbraid",
+  "configuration_change": "dashboard_dir only",
+  "lane_ownership_profiles_generations_unchanged": true,
+  "request_outcomes_unchanged": true,
+  "run_outcomes_unchanged": true,
+  "request_count": 6,
+  "run_count": 5,
+  "production_flags_unchanged": true,
+  "binary_and_executor_paths_unchanged": true,
+  "previous_draining": false,
+  "draining_restored": true,
+  "validation": {
+    "frontend_typecheck": "passed",
+    "frontend_tests": 10,
+    "frontend_build": "passed",
+    "impeccable_detector": [],
+    "browser": "desktop 1440px and mobile 390px login/authenticated views; loopback and LAN favicon HTTP 200",
+    "browser_report": "dashboard-brand-browser-20261017.json",
+    "source_scope": "frontend brand wiring only; no Rust/backend change included"
+  },
+  "screenshots_local_ignored": [
+    ".impeccable/review/shipbraid-login-desktop.png",
+    ".impeccable/review/shipbraid-login-mobile.png",
+    ".impeccable/review/shipbraid-dashboard-desktop.png",
+    ".impeccable/review/shipbraid-dashboard-mobile.png"
+  ],
+  "root_cause": "Live dashboard_dir still pointed to the old frontend build; source branding used the old CSS mark and had no favicon link.",
+  "reload_note": "A previously open browser page retained cached HTML; a normal page reload loaded the new content-hashed bundle and icons."
+}

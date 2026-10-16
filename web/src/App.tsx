@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } fro
 import { ApiError, createApiClient, describeApiError } from "./api";
 import { Icon } from "./Icon";
 import { LogFeed } from "./LogFeed";
+import shipbraidLogo from "./assets/shipbraid-logo.png";
 import {
   eventLabel,
   formatDate,
@@ -111,7 +112,7 @@ function ConnectionScreen({
         <span className="connect-top-note"><Icon name="lock" size={14} />本地协调器</span>
       </div>
       <section className="connect-frame" aria-labelledby="connect-title">
-        <div className="connect-glyph" aria-hidden="true"><Icon name="layers" size={22} /></div>
+        <div className="connect-glyph" aria-hidden="true"><img src={shipbraidLogo} width="72" height="72" alt="" /></div>
         <h1 id="connect-title">连接发布协调器</h1>
         <p className="connect-description">
           连接后查看真实的发布通道、请求账本和执行记录。此页面不会创建或修改请求。
@@ -162,7 +163,7 @@ function ConnectionScreen({
 function Brand() {
   return (
     <div className="brand-lockup">
-      <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
+      <img className="brand-mark" src={shipbraidLogo} width="32" height="32" alt="" aria-hidden="true" />
       <span className="brand-word">shipbraid</span>
     </div>
   );

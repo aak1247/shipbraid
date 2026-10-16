@@ -85,6 +85,8 @@ The ledger is the primary working surface. Requests and executions remain separa
 - Borders, alignment, and surface tone carry most of the hierarchy.
 - Verification details remain traceable to their source execution.
 
+The approved teal-and-amber Shipbraid braid is the shared brand mark in the page header, connection screen, browser favicon, and touch icon. It ships as a local image with a content-hashed URL, keeps its transparent background and aspect ratio, and appears beside selectable brand text. Operational icons retain their existing stroke system.
+
 ## Colors
 
 The palette uses cool, low-chroma paper and graphite neutrals with a muted green accent. State colors stay local to the state they explain.
