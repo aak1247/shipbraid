@@ -132,3 +132,5 @@ AutoTask 的 `pnpm deploy:local` 通过 HTTP 提交并等待，具体 worker 在
 升级安装器拒绝覆盖仍 active 的协调器。先 drain，等活动任务结算并核对所有权，再停止服务、安装新 release。停止协调器不会停止独立执行的发布任务。
 
 Dashboard 的独立静态资源发布目录为 `~/.local/share/shipbraid/dashboard-releases/<commit>-<digest>/web`。仅前端更新时，构建 `web/dist`，复制到新的不可变目录，切换私有配置中的 `dashboard_dir` 后重启协调器；执行器路径、lane 配置和 profile 指纹保持原值，启动后核对现有任务所有权。完整程序/执行器升级仍遵循上面的排空流程。宽详情与 tail 日志的浏览器及发布证据见 [dashboard-tail-20261016.json](acceptance/dashboard-tail-20261016.json)。
+
+失败恢复与重复观察修复的本机验收见 [2026-10-17 记录](acceptance/hook-failure-recovery-20261017.json)。该次维护保留旧安装的 unit、数据目录和冻结执行器配置，只更新协调器及只读失败观察器；旧失败请求进入需处理，未重试发布，生产仍禁用。

@@ -1,0 +1,187 @@
+{
+  "recorded_at": "2026-10-16T17:00:53.557183+00:00",
+  "source_commit": "2640bfebdb1d7145dea47691a6584b4d288a13f8",
+  "scope": "Fix failed-job convergence and repeated observation events; no production enablement or deployment retry",
+  "validation": {
+    "cargo_fmt_check": "passed",
+    "cargo_clippy_locked_all_targets_warnings_denied": "passed",
+    "cargo_test_locked": {
+      "library": 45,
+      "cli": 6,
+      "ledger_invariants": 2,
+      "failed": 0
+    },
+    "python_bridge": 19,
+    "python_installer": 5,
+    "isolated_acceptance": [
+      "scripted coordinator",
+      "command/script/webhook hooks",
+      "agent permissions and recovery",
+      "CLI recovery and errors"
+    ],
+    "cargo_release_locked": "passed"
+  },
+  "live": {
+    "url": "http://172.168.3.70:8787",
+    "service": "auto-deliver.service",
+    "database": "existing legacy ledger; SQLite online backup created before upgrade",
+    "runtime_names_and_database_paths_preserved": true,
+    "binary_sha256": "262133ffd0bcf5825b729cc137f58231a19abee37159cdb1e56fea023ac01957",
+    "bridge_sha256": "80a0044312f179afc1759b135a146eb637e1cfb01297704acbe2c897ec24251a",
+    "profiles": {
+      "autotask-dev": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+      "autotask-prod": "655238d42b2edb25b608ac8aea796da72620d1172c04f72116c57d8534fd734e"
+    },
+    "dedup_window": {
+      "seconds": 22.0,
+      "first": {
+        "at": 1792169965.3356833,
+        "count": 32072,
+        "unknown_count": 15315,
+        "log_count": 15862,
+        "updated_at": "2026-10-16T16:59:14.089698723Z",
+        "state": "unknown"
+      },
+      "last": {
+        "at": 1792169987.3673544,
+        "count": 32072,
+        "unknown_count": 15315,
+        "log_count": 15862,
+        "updated_at": "2026-10-16T16:59:14.089698723Z",
+        "state": "unknown"
+      }
+    },
+    "recovery": {
+      "run_state": "failed",
+      "request_status": "needs_attention",
+      "active_run_id": null,
+      "failure_paused": true,
+      "production_enabled": false,
+      "run_count": 2,
+      "receipt_count": 1,
+      "original_result_unchanged": true,
+      "execution_profiles_unchanged": true,
+      "dashboard_dir_unchanged": true,
+      "proof": {
+        "executor_ref": "auto-deliver-autotask-34acc90e-187f-49ce-88a7-c78b78ba280c-3.service",
+        "generation": 3,
+        "proof": {
+          "evidence": {
+            "generation": 3,
+            "legacy_result_read_only": true,
+            "observer_config_sha256": "406f32a991b55d960c92532735025c88714f3b951c4690dd680f5e336c6d2544",
+            "process_check": {
+              "control_group": "",
+              "groups_scanned": 0,
+              "pids": [],
+              "state": "destroyed"
+            },
+            "result": {
+              "finished_at": "2026-10-16T12:30:24.270493Z",
+              "generation": 3,
+              "invocation_id": "fe7a1e418a484f3ab6f98791aa96511d",
+              "returncode": 101,
+              "run_id": "34acc90e-187f-49ce-88a7-c78b78ba280c",
+              "target": {
+                "components": [
+                  "app"
+                ],
+                "config_version": 1,
+                "coverage_mode": "exact",
+                "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+                "release_line_id": "autotask:e21ef8c26b5d1386",
+                "repository_id": "autotask",
+                "revision": "0d78bc0a24ca69b53ea95ef7d7d8cf309817e956"
+              },
+              "unit": "auto-deliver-autotask-34acc90e-187f-49ce-88a7-c78b78ba280c-3.service"
+            },
+            "run_id": "34acc90e-187f-49ce-88a7-c78b78ba280c",
+            "supervisor": {
+              "ActiveState": "failed",
+              "ControlGroup": "",
+              "ExecMainCode": "1",
+              "ExecMainExitTimestamp": "Fri 2026-10-16 20:30:24 CST",
+              "ExecMainStatus": "101",
+              "Id": "auto-deliver-autotask-34acc90e-187f-49ce-88a7-c78b78ba280c-3.service",
+              "InvocationID": "fe7a1e418a484f3ab6f98791aa96511d",
+              "LoadState": "loaded",
+              "MainPID": "0",
+              "Result": "exit-code",
+              "SubState": "failed"
+            },
+            "target": {
+              "components": [
+                "app"
+              ],
+              "config_version": 1,
+              "coverage_mode": "exact",
+              "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+              "release_line_id": "autotask:e21ef8c26b5d1386",
+              "repository_id": "autotask",
+              "revision": "0d78bc0a24ca69b53ea95ef7d7d8cf309817e956"
+            },
+            "unit": "auto-deliver-autotask-34acc90e-187f-49ce-88a7-c78b78ba280c-3.service"
+          },
+          "observed_at": "2026-10-16T16:59:51.057692Z"
+        },
+        "run_id": "34acc90e-187f-49ce-88a7-c78b78ba280c"
+      },
+      "events": [
+        {
+          "kind": "failure_stop_verified",
+          "sequence": 32072,
+          "timestamp": "2026-10-16T16:59:51.078596866Z"
+        },
+        {
+          "kind": "request_needs_attention",
+          "sequence": 32073,
+          "timestamp": "2026-10-16T16:59:51.078596866Z"
+        },
+        {
+          "kind": "run_failed",
+          "sequence": 32074,
+          "timestamp": "2026-10-16T16:59:51.078596866Z"
+        }
+      ],
+      "http_checks": {
+        "http://127.0.0.1:8787": {
+          "/ready": 200,
+          "/": 200,
+          "unauthenticated": 401,
+          "admin": "needs_attention + retry",
+          "operator": "needs_attention + retry"
+        },
+        "http://172.168.3.70:8787": {
+          "/ready": 200,
+          "/": 200,
+          "unauthenticated": 401,
+          "admin": "needs_attention + retry",
+          "operator": "needs_attention + retry"
+        }
+      },
+      "event_count": 32077
+    },
+    "post_recovery": {
+      "stable_seconds": 20,
+      "event_growth": 0,
+      "events": 32077,
+      "runs": 2,
+      "sqlite_integrity": "ok",
+      "coordinator_and_autotask_services": "active"
+    },
+    "final_release": {
+      "source_commit": "486d5b5457bf3f17705d7666c95b481394d46f75",
+      "binary_sha256": "262133ffd0bcf5825b729cc137f58231a19abee37159cdb1e56fea023ac01957",
+      "bridge_sha256": "287716c85c8bfb9f7ed0ac1535a03a0bd7623b0a2773e2aa3f69844846bc7283"
+    },
+    "final_read_only_observer_revalidation": "passed; explicit cgroup property present; same frozen target, generation and supervisor invocation",
+    "restart_preserved_failure_barrier": true,
+    "autotask_backend_ready": true
+  },
+  "limitations": [
+    "Historical duplicate audit rows are preserved.",
+    "Failed request requires explicit retry; the environment is not claimed unchanged or successfully deployed.",
+    "Production is disabled. The earlier sustained-load performance gate was not rerun by this fix."
+  ],
+  "final_source_commit": "486d5b5457bf3f17705d7666c95b481394d46f75"
+}

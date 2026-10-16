@@ -36,7 +36,7 @@ shipbraid --json list lane
 5. 保留旧运行的 `executor_ref` 及冻结 hook 配置，不能把历史 unit 字符串直接替换成新前缀。Bridge 能识别相同 run/generation 的旧任务身份，并继续只读观察；这不表示可以绕过执行器配置指纹检查。
 6. 新服务启动后核对请求/run/receipt、lane 所有权、禁用生产状态、鉴权与观察，再按运维流程恢复调度。若需移动配置/数据或替换 hook 路径，需单独验证冻结配置兼容和恢复过程，不能把新安装器当自动迁移工具。
 
-本轮没有执行上述维护动作，也没有宣称已有本机服务已经改名。旧安装恢复阻塞与生产准入问题仍见[原只读审计](acceptance/production-readiness-20261017.json)。
+本轮没有执行上述维护动作，也没有宣称已有本机服务已经改名。[原只读审计](acceptance/production-readiness-20261017.json)记录了当时的恢复阻塞与生产准入问题。随后独立的[失败恢复修复](acceptance/hook-failure-recovery-20261017.json)保留旧 unit/数据路径完成协调器维护，并凭新鲜停止证据将旧 unknown 执行结算为失败；生产仍禁用。
 
 ## 历史记录与仓库托管地址
 
