@@ -19,6 +19,8 @@ jobs:
       - run: cargo build --locked
       - run: python3 scripts/acceptance.py
       - run: python3 scripts/acceptance-hooks.py
+      - run: python3 scripts/acceptance-agents.py
+      - run: python3 scripts/acceptance-cli.py
       - run: python3 integration/autotask/test_bridge.py
   dashboard:
     runs-on: ubuntu-latest

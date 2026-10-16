@@ -1,8 +1,8 @@
-# M1 HTTP / CLI contract
+# Shipbraid HTTP / CLI contract
 
-All `/v1` endpoints require a configured bearer token. Tokens identify the actor; a body cannot choose another principal. Read responses are scoped by the token's project/lane grants. `admin`, `urgent`, and `executor` are separate capabilities. `/live` and `/ready` disclose health only.
+All `/v1` endpoints require a configured bearer token. The server fixes `tenant_id` to `local`; clients cannot select a tenant. Tokens identify the actor; a body cannot choose another principal. Read responses are scoped by the token's project/lane grants. `admin`, `urgent`, and `executor` are separate capabilities. `/live` and `/ready` disclose health only.
 
-Lists return `{ "items": [...] }`. Details return entity fields at the top level. Dates are UTC RFC3339 strings; request/run IDs are UUIDs, lane IDs are configured slugs. Errors have `{ "code", "message", "retryable" }`. JSON body limit is 16 KiB, reason limit 2 KiB. Unknown fields in commands are rejected.
+Lane/run/event lists return `{ "items": [...] }`. Request lists return `{ "items": [...], "next_cursor": null | "opaque-cursor" }`, default 100 and maximum 200 entries per page; callers must follow cursors. Details return entity fields at the top level. Dates are UTC RFC3339 strings; request/run IDs are UUIDs, lane IDs are configured slugs. Errors have `{ "code", "message", "retryable" }`. JSON body limit is 16 KiB, reason limit 2 KiB. Unknown fields in commands are rejected.
 
 | Method | Route | Purpose |
 | --- | --- | --- |
@@ -26,6 +26,20 @@ Lists return `{ "items": [...] }`. Details return entity fields at the top level
 | POST | `/v1/lanes/{id}/resolve-unknown` | Admin: reconcile independently observed evidence |
 
 Cursor sequences belong to a lane. Events require `lane_id`, including the first page; logs belong to a single run. When a request follows a successor, start that run's log cursor at zero.
+
+## Agent discovery, context, and collaboration
+
+`GET /v1/system` adds `api_version: "1"`, `tenant_id: "local"`, authenticated `principal`, and `capabilities` (submit/withdraw/retry/raise_priority/admin). These are principal capabilities, not permission to mutate every request. Lane views include `tenant_id`, `repository_id`, allowed `components` and `coverage_modes`; filesystem paths and credentials are omitted.
+
+Submission optionally accepts `task_id`, `session_id` (nonempty, at most 256 bytes, no control characters), and `collaborators` (at most 16 configured, lane-authorized, non-executor token ids). Task and sorted/deduplicated collaborators participate in the request hash only when nonempty; absent/null/empty context and session-only submissions preserve the old hash. Session is creation trace only and never changes on replay. Collaborators are immutable in this version.
+
+Each request view adds these flat context fields, `tenant_id`, `waiting_reason`, `blocked_reason`, and `allowed_actions` (`withdraw`, `retry`, `raise_priority`). Owner, explicit collaborator or admin may mutate a request, subject to lane scope and current state. Urgent submission/priority promotion and retry of an existing urgent request also require urgent/admin capability. Withdrawing urgent does not require that extra capability. Actual mutation rechecks within the serialized write transaction; action hints are snapshots, not authorization grants. New request-operation events expose their authenticated `actor`; historical/system events may have null actor.
+
+`GET /v1/requests` supports `lane_id` or project/environment, plus `task_id`, `principal`, `status`, `limit` (1..200; default 100), and opaque `cursor`. Unknown statuses, invalid limits, and invalid cursors return structured 400 errors. Preserve filters between pages. Ordering is descending immutable `(created_at, lane_id, creation_sequence, id)`; keyset pagination avoids offset drift but is not a cross-page snapshot. Dynamic filters or clock changes may alter later results. Recovery should restart from the first page filtered by task. Tenant/lane scope is checked on every page.
+
+A task reference does not deduplicate identities: different principals retain separate requests. A successor agent should query the original task and wait on its existing request. Only the original principal replaying the same intent/key deduplicates submission.
+
+See [Agent guide](agents.md) for CLI machine errors, deterministic task keys, bounded wait retries and examples. HTTP API version remains v1 with additive entity fields; request-list default pagination is an intentional behavior change.
 
 ## Submit
 
