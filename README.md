@@ -12,6 +12,10 @@ Shipbraid coordinates release requests from developers, agents, and automation. 
 
 The Cargo package and executable are `shipbraid`; environment variables use `SHIPBRAID_`, and new installations use `shipbraid.service`. See the [rename and upgrade notes](docs/naming.md) before upgrading an existing installation.
 
+![Shipbraid dashboard showing release requests and a verified environment receipt](docs/assets/shipbraid-dashboard.png)
+
+Release requests, execution links, and environment verification receipts in the read-only dashboard.
+
 ## Why Shipbraid?
 
 Several callers may ask to release the same version. A newer urgent release may cover work already queued. Canceling a CI run can leave callers wondering whether their change ever reached the environment.
