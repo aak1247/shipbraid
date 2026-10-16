@@ -1,0 +1,37 @@
+{
+  "observed_at": "2026-10-16T12:19:38.427120+00:00",
+  "url": "http://127.0.0.1:8787",
+  "run_id": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+  "receipt_id": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+  "authenticated": true,
+  "unauthenticated_api_status": 401,
+  "static_dashboard_status": 200,
+  "project_environment_filters": true,
+  "real_logs_visible": true,
+  "run_succeeded_visible": true,
+  "both_requests_satisfied_visible": true,
+  "receipt_success_visible": true,
+  "expanded_independent_report_visible": true,
+  "production_disabled_visible": true,
+  "viewports": [
+    {
+      "width": 1440,
+      "scroll_width": 1440
+    },
+    {
+      "width": 390,
+      "scroll_width": 390,
+      "expanded_report": true
+    }
+  ],
+  "local_storage_count": 0,
+  "session_storage_count": 0,
+  "screenshots": [
+    ".impeccable/review/auto-deliver-success-desktop.png",
+    ".impeccable/review/auto-deliver-success-mobile.png"
+  ],
+  "visible_total_requests": 3,
+  "visible_total_runs": 2,
+  "selected_run_is_completed_acceptance_run": true,
+  "later_independent_request_visible": true
+}

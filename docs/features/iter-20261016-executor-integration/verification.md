@@ -1,31 +1,47 @@
 # 验收记录：可配置执行器与 AutoTask 开发环境接入
 
-日期：2026-10-16。状态：ACTIVE。代码、隔离验收、CI、user service 安装和真实请求发起均已完成；该真实 run 尚未取得最终 receipt，T-104 保持进行中。
+日期：2026-10-16。状态：DONE。本迭代代码、质量检查、常驻部署、真实开发发布与 Dashboard 验收均已完成。生产未启用；原 M1 未通过的性能验收保持开放。
 
-## 已通过
+## 真实开发发布
 
-- Auto-deliver Rust：38 个测试、`cargo fmt --all --check`、`cargo clippy --locked --all-targets -- -D warnings` 和 debug build 通过。GitHub Actions [run 38897050033](https://github.com/aak1247/auto-deliver/actions/runs/38897050033) 对 commit `880c1de` 报告 SUCCESS。
-- Dashboard：10 个前端测试、typecheck 和 build 通过。1440px 浏览器已验证真实服务鉴权、过滤器、详情和本次真实 run 的日志；最终 receipt 展示待运行完成。
-- M1 regression：[m1-regression.json](m1-regression.json) 通过，覆盖账本/权限/并发共享、抢占、unknown 恢复、drain、备份恢复与显式 retry。该脚本用 ScriptedExecutor，`real_deployments` 为 0。
-- 三类 hooks 协议：[hooks-acceptance.json](hooks-acceptance.json) 通过，验证 command/script/webhook、跨 lane 权限、空 HTTP 202 不等于 Started、重启后独立只读验证、错误输出/非零退出/超时不产生成功 receipt。所有执行均为 synthetic，`real_deployments` 为 0。
-- AutoTask bridge 的 6 个 Python tests、AutoTask wrapper 的 4 个 HTTP tests，以及 deploy lock/fence Bash suite 均通过；入口与 bridge 代码已完成独立复核。Bridge 测试文件：[test_bridge.py](../../../integration/autotask/test_bridge.py)。
-- 独立设计 gate、Rust hooks bounded-scope review、bridge/installer fix review 均 PASS。
+[现场证据](real-development-deployment.json) 记录一次真实发布，两项独立提交共享同一个物理任务：
 
-## 真实开发请求进度
+- HTTP（AutoTask `pnpm deploy:local`）：`f6315628-c0cc-434b-96ae-d3d0651b74eb`。
+- Rust CLI：`2496d753-3ef9-45c1-966e-aad5082a11f7`。
+- Run：`b2924ad8-1949-45ab-b712-21dbd07628bc`，generation 1，state `succeeded`。
+- 冻结源码：`7454e798bff72cf43175e8b565edf7270b98a246`，重新发布当时实际运行的开发版本。
+- 独立 systemd unit：`auto-deliver-autotask-b2924ad8-1949-45ab-b712-21dbd07628bc-1.service`，退出码 0，保留 `active/exited` 的稳定身份。
+- Receipt：`e31d69a1-fb32-44fa-b776-c3c05552279f`，独立观察时间 `2026-10-16T12:18:23.692546Z`。两请求均为 `satisfied` 且引用该相同 run/receipt；HTTP wrapper 恢复等待与 CLI wait 均退出 0。
 
-- `auto-deliver.service` 已安装、运行并在 `127.0.0.1:8787` ready；production 仍 disabled，远程管理使用 SSH tunnel。
-- HTTP request `f6315628-c0cc-434b-96ae-d3d0651b74eb` 与 CLI request `2496d753-3ef9-45c1-966e-aad5082a11f7` 已合并到同一个实际物理 run：`b2924ad8-1949-45ab-b712-21dbd07628bc`，generation `1`，目标 SHA `7454e798bff72cf43175e8b565edf7270b98a246`。真实 systemd executor 已启动。
-- 当前执行正在等待既有 AutoTask deploy lock。该锁由另一个 Codex Python 验证脚本持有，脚本在获取两把锁后明确保留 900 秒；没有尝试中断或绕过该锁。待锁释放后，仍需独立验证 source/process hash 与健康状态并取得匹配 receipt。
-- Dashboard 浏览器已能显示该真实 run 的日志；receipt 与其最终状态尚未可见/记录。Root 将在验收完成后追加 receipt 和最终浏览器证据。
+执行先等待其他会话的临时验收锁正常释放，随后完整构建 Worker、docker-proxy、后端及匹配 chat runtime，重启后端、前端与 Worker。Worker 构建日志用时 4m53s；合并请求节省重复构建，未宣称缩短单轮构建时间。
 
-## 已推送的 AutoTask 改动
+发布结果和随后独立只读 verify 的环境证明一致：部署 checkout 的 SHA/tree 匹配且干净；实际 backend PID 2160080、frontend PID 2160328、worker PID 2167226；backend/worker 的 `/proc/PID/exe` 路径、文件哈希与构建产物一致；进程启动身份稳定且三个服务均已重启。`/live`、`/ready`（ready=true）与前端入口均 HTTP 200。完整哈希、脚本指纹和 profile/component digest 保存在现场证据中。
 
-AutoTask core patch 已推送到 `origin/vibe`。远端提交为 [`8c1dc7536`](https://github.com/aak1247/autotask/commit/8c1dc7536)、[`353ec5c9b`](https://github.com/aak1247/autotask/commit/353ec5c9b)、[`2ff1110fc`](https://github.com/aak1247/autotask/commit/2ff1110fc)、[`cf08f7673`](https://github.com/aak1247/autotask/commit/cf08f7673)，对应本地开发提交 `c4299122a`、`d6325ce07`、`88c22988d`、`21f7b0861`。主共享工作区存在其他未提交改动且分支历史分叉，因此通过隔离 worktree 推送；未覆盖或回滚这些外来文件。
+## 常驻服务与 Dashboard
 
-## 部署边界与待验收项
+`auto-deliver.service` 已安装、enabled、active，监听 `127.0.0.1:8787`，版本 0.2.0；`/ready` 通过，静态入口 200，未认证 API 401。[安装目标](service-installation.json) 指向不可变 binary/web/bridge/发布脚本目录；本地凭据 mode0600，仅保留在主机私有配置中。
 
-- 首次只针对本机 `autotask-dev`。协调器监听 `127.0.0.1:8787`，远程访问走 SSH tunnel；production 保持 disabled，旧 opaque hooks 不可抢占。
-- AutoTask 主工作区 HEAD 已分叉于当前部署基线。初始可信 mirror 必须从实际部署 checkout 的当前版本（SHA 前缀 `7454e798`）建立，避免把较旧共享 HEAD 部署回去；其后 mirror 更新只接受 fast-forward。
-- [service-installation.json](service-installation.json) 保留目标、release 路径和 production-disabled 配置；当前 service ready 状态及请求/run 身份以上述现场检查记录为准。
-- T-104 尚未完成：当前真实 run 必须在 lock 正常释放后完成；随后独立检查源码、实际进程哈希和健康状态，保存匹配 receipt，并在 Dashboard 中复核最终 receipt。不能把当前活跃 run、HTTP/CLI 接收或 synthetic fixture 作为发布成功。
-- 上一轮原始 M1 NFR-001（50 requests/s 持续 60s、p95 < 250ms）仍为 **NOT PASSED**；本次正确性 regression 和 hooks fixture 不关闭该性能验收，也不代表生产可用。
+[浏览器验收](browser-verification.json) 覆盖鉴权、项目/环境过滤、禁用生产通道、真实日志、成功 run、两个已满足请求、成功 receipt 和展开的独立环境报告。1440px 和 390px 的 document scrollWidth 分别等于视口宽度，展开报告无横向溢出。localStorage 与 sessionStorage 均无条目。最终截图也包含随后另行提交的下一项开发请求；本记录只验收上述两个请求及其单个成功 run，不将后续任务计入本次成功。桌面/手机截图保存在本机 `.impeccable/review/auto-deliver-success-{desktop,mobile}.png`，未包含凭据。
+
+远程管理使用 SSH tunnel：`ssh -L 8787:127.0.0.1:8787 yahui@172.168.3.70`，随后打开本机 `http://127.0.0.1:8787`。
+
+## 检查与评审
+
+- Rust：38 个测试、fmt、clippy（warnings denied）、debug/release build 通过。
+- Dashboard：10 个测试、typecheck、生产 build 通过。
+- Bridge 6 个 Python tests、AutoTask wrapper 4 个真实 HTTP fixture tests、deploy lock/fence Bash suite 通过。
+- [M1 regression](m1-regression.json) 与 [三传输 hooks 验收](hooks-acceptance.json) 通过。它们属于 synthetic fixture，分别保留 `real_deployments: 0`；仅上述独立现场记录的 `real_deployments: 1` 代表真实部署。
+- Hooks 验收涵盖 command/script/webhook、HTTP/CLI 环境选择、权限、空 HTTP 202 不等于 Started、Delivered Verify 后 SIGKILL 恢复且只读再验收、错误输出/非零退出/超时不产生成功回执。
+- 独立设计 gate、Rust hooks bounded-scope review、bridge/installer 修订复核均 PASS。
+- GitHub CI [run 38898166993](https://github.com/aak1247/auto-deliver/actions/runs/38898166993)（`5533271`）与 [run 38897050033](https://github.com/aak1247/auto-deliver/actions/runs/38897050033)（安装版本 `880c1de`）均 SUCCESS。
+
+## 代码交付
+
+Auto-deliver `main` 已推送至 [aak1247/auto-deliver](https://github.com/aak1247/auto-deliver)。AutoTask core patch 已推送 `origin/vibe`：[`8c1dc7536`](https://github.com/aak1247/autotask/commit/8c1dc7536)、[`353ec5c9b`](https://github.com/aak1247/autotask/commit/353ec5c9b)、[`2ff1110fc`](https://github.com/aak1247/autotask/commit/2ff1110fc)、[`cf08f7673`](https://github.com/aak1247/autotask/commit/cf08f7673)。由于共享工作区存在其他会话的改动及分叉提交，通过隔离 worktree 推送本任务补丁，保留共享区所有其他改动。
+
+## 运行边界
+
+- 首次仅启用 `autotask-dev`；`autotask-prod` disabled，桥接器本身拒绝 prod。外部 hooks v1 整体不可抢占；urgent 提高排队优先级，不强杀真实脚本。
+- 本次重新发布实际开发版本。共享本地 HEAD 与其历史分叉；默认发布该 HEAD 前需要先合并历史。受信 mirror 从实际部署版本开始，只接受快进；协调发布拒绝脏 checkout、倒退与分叉替换。
+- 单实例、本地 SQLite 持久卷；未知状态保留所有权，重启不会盲重发真实 dispatch。公网入口和生产接入仍需独立配置。
+- 原 M1 NFR-001（50 requests/s × 60s、p95 < 250ms）仍为 **NOT PASSED**。本迭代未重新执行该负载指标，不关闭原计划的性能、完整故障矩阵及后续能力任务；本机成功不代表生产可用。

@@ -1,0 +1,208 @@
+{
+  "recorded_at": "2026-10-16T12:18:24Z",
+  "target": "local-development-only",
+  "real_deployments": 1,
+  "submission_transports": [
+    "AutoTask pnpm deploy:local via HTTP",
+    "auto-deliver CLI"
+  ],
+  "requests": [
+    {
+      "auto_retries_used": 0,
+      "components": [
+        "app"
+      ],
+      "coverage_mode": "exact",
+      "created_at": "2026-10-16T12:01:58.125170397Z",
+      "creation_sequence": 2,
+      "current_run_id": null,
+      "deadline_at": null,
+      "id": "f6315628-c0cc-434b-96ae-d3d0651b74eb",
+      "lane_id": "autotask-dev",
+      "manual_retries_used": 0,
+      "principal": "local-dev-operator",
+      "priority": "normal",
+      "reason": "AutoTask coordinated deployment",
+      "receipt": {
+        "component_digests": {
+          "app": "608848060bb78f4c9bc942d19f18aff8f3a6328c6a5df943a2e941cb46b2552f"
+        },
+        "generation": 1,
+        "id": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+        "observed_at": "2026-10-16T12:18:23.692546Z",
+        "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+        "result": "success",
+        "run_id": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+        "source_revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+        "verification_report": "{\"executor_ref\": \"auto-deliver-autotask-b2924ad8-1949-45ab-b712-21dbd07628bc-1.service\", \"independent_observation\": {\"backend_build_skipped\": false, \"checks\": [{\"status\": 200, \"url\": \"http://127.0.0.1:8011/live\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8011/ready\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8012/\"}], \"deploy_script_sha256\": \"219bdac5092df5a57816d71a4d11a7aca142a9ffc90d2fed92a4cb9f03fcae31\", \"services\": {\"backend\": {\"cwd\": \"/home/yahui/repos/autotask-head/server\", \"pid\": 2160080, \"sha256\": \"956ae09146bb5ab7de7d1340f6305ff1637532277d25f3019d7b6b300432b2b9\", \"start_ticks\": \"26029982\", \"unit\": \"autotask-backend.service\"}, \"frontend\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2160328, \"start_ticks\": \"26030078\", \"unit\": \"autotask-frontend.service\"}, \"worker\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2167226, \"sha256\": \"98cdc9578d2e8e0f6f41ef274143162ffba0cda13c14d7647546129261969183\", \"start_ticks\": \"26035036\", \"unit\": \"autotask-worker.service\"}}, \"source_revision\": \"7454e798bff72cf43175e8b565edf7270b98a246\", \"source_tree\": \"39aed0d582826d15c8d975ec3e232809b13b33ab\", \"worker_build_skipped\": false}}"
+      },
+      "revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+      "satisfied_by_receipt": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+      "satisfied_by_run": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+      "status": "satisfied"
+    },
+    {
+      "auto_retries_used": 0,
+      "components": [
+        "app"
+      ],
+      "coverage_mode": "exact",
+      "created_at": "2026-10-16T12:01:58.826420785Z",
+      "creation_sequence": 3,
+      "current_run_id": null,
+      "deadline_at": null,
+      "id": "2496d753-3ef9-45c1-966e-aad5082a11f7",
+      "lane_id": "autotask-dev",
+      "manual_retries_used": 0,
+      "principal": "local-dev-operator",
+      "priority": "normal",
+      "reason": "",
+      "receipt": {
+        "component_digests": {
+          "app": "608848060bb78f4c9bc942d19f18aff8f3a6328c6a5df943a2e941cb46b2552f"
+        },
+        "generation": 1,
+        "id": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+        "observed_at": "2026-10-16T12:18:23.692546Z",
+        "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+        "result": "success",
+        "run_id": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+        "source_revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+        "verification_report": "{\"executor_ref\": \"auto-deliver-autotask-b2924ad8-1949-45ab-b712-21dbd07628bc-1.service\", \"independent_observation\": {\"backend_build_skipped\": false, \"checks\": [{\"status\": 200, \"url\": \"http://127.0.0.1:8011/live\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8011/ready\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8012/\"}], \"deploy_script_sha256\": \"219bdac5092df5a57816d71a4d11a7aca142a9ffc90d2fed92a4cb9f03fcae31\", \"services\": {\"backend\": {\"cwd\": \"/home/yahui/repos/autotask-head/server\", \"pid\": 2160080, \"sha256\": \"956ae09146bb5ab7de7d1340f6305ff1637532277d25f3019d7b6b300432b2b9\", \"start_ticks\": \"26029982\", \"unit\": \"autotask-backend.service\"}, \"frontend\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2160328, \"start_ticks\": \"26030078\", \"unit\": \"autotask-frontend.service\"}, \"worker\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2167226, \"sha256\": \"98cdc9578d2e8e0f6f41ef274143162ffba0cda13c14d7647546129261969183\", \"start_ticks\": \"26035036\", \"unit\": \"autotask-worker.service\"}}, \"source_revision\": \"7454e798bff72cf43175e8b565edf7270b98a246\", \"source_tree\": \"39aed0d582826d15c8d975ec3e232809b13b33ab\", \"worker_build_skipped\": false}}"
+      },
+      "revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+      "satisfied_by_receipt": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+      "satisfied_by_run": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+      "status": "satisfied"
+    }
+  ],
+  "run": {
+    "components": [
+      "app"
+    ],
+    "coverage_mode": "exact",
+    "created_at": "2026-10-16T12:02:00.276308690Z",
+    "effective_priority": "normal",
+    "executor_ref": "auto-deliver-autotask-b2924ad8-1949-45ab-b712-21dbd07628bc-1.service",
+    "generation": 1,
+    "id": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+    "lane_id": "autotask-dev",
+    "phase": "verifying",
+    "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+    "receipt": {
+      "component_digests": {
+        "app": "608848060bb78f4c9bc942d19f18aff8f3a6328c6a5df943a2e941cb46b2552f"
+      },
+      "generation": 1,
+      "id": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+      "observed_at": "2026-10-16T12:18:23.692546Z",
+      "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+      "result": "success",
+      "run_id": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+      "source_revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+      "verification_report": "{\"executor_ref\": \"auto-deliver-autotask-b2924ad8-1949-45ab-b712-21dbd07628bc-1.service\", \"independent_observation\": {\"backend_build_skipped\": false, \"checks\": [{\"status\": 200, \"url\": \"http://127.0.0.1:8011/live\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8011/ready\"}, {\"status\": 200, \"url\": \"http://127.0.0.1:8012/\"}], \"deploy_script_sha256\": \"219bdac5092df5a57816d71a4d11a7aca142a9ffc90d2fed92a4cb9f03fcae31\", \"services\": {\"backend\": {\"cwd\": \"/home/yahui/repos/autotask-head/server\", \"pid\": 2160080, \"sha256\": \"956ae09146bb5ab7de7d1340f6305ff1637532277d25f3019d7b6b300432b2b9\", \"start_ticks\": \"26029982\", \"unit\": \"autotask-backend.service\"}, \"frontend\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2160328, \"start_ticks\": \"26030078\", \"unit\": \"autotask-frontend.service\"}, \"worker\": {\"cwd\": \"/home/yahui/repos/autotask-head\", \"pid\": 2167226, \"sha256\": \"98cdc9578d2e8e0f6f41ef274143162ffba0cda13c14d7647546129261969183\", \"start_ticks\": \"26035036\", \"unit\": \"autotask-worker.service\"}}, \"source_revision\": \"7454e798bff72cf43175e8b565edf7270b98a246\", \"source_tree\": \"39aed0d582826d15c8d975ec3e232809b13b33ab\", \"worker_build_skipped\": false}}"
+    },
+    "receipt_id": "e31d69a1-fb32-44fa-b776-c3c05552279f",
+    "replacement_run_id": null,
+    "revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+    "state": "succeeded",
+    "updated_at": "2026-10-16T12:18:24.238486290Z"
+  },
+  "independent_job_result": {
+    "finished_at": "2026-10-16T12:18:00.224822Z",
+    "generation": 1,
+    "proof": {
+      "backend_build_skipped": false,
+      "checks": [
+        {
+          "status": 200,
+          "url": "http://127.0.0.1:8011/live"
+        },
+        {
+          "status": 200,
+          "url": "http://127.0.0.1:8011/ready"
+        },
+        {
+          "status": 200,
+          "url": "http://127.0.0.1:8012/"
+        }
+      ],
+      "deploy_script_sha256": "219bdac5092df5a57816d71a4d11a7aca142a9ffc90d2fed92a4cb9f03fcae31",
+      "services": {
+        "backend": {
+          "cwd": "/home/yahui/repos/autotask-head/server",
+          "pid": 2160080,
+          "sha256": "956ae09146bb5ab7de7d1340f6305ff1637532277d25f3019d7b6b300432b2b9",
+          "start_ticks": "26029982",
+          "unit": "autotask-backend.service"
+        },
+        "frontend": {
+          "cwd": "/home/yahui/repos/autotask-head",
+          "pid": 2160328,
+          "start_ticks": "26030078",
+          "unit": "autotask-frontend.service"
+        },
+        "worker": {
+          "cwd": "/home/yahui/repos/autotask-head",
+          "pid": 2167226,
+          "sha256": "98cdc9578d2e8e0f6f41ef274143162ffba0cda13c14d7647546129261969183",
+          "start_ticks": "26035036",
+          "unit": "autotask-worker.service"
+        }
+      },
+      "source_revision": "7454e798bff72cf43175e8b565edf7270b98a246",
+      "source_tree": "39aed0d582826d15c8d975ec3e232809b13b33ab",
+      "worker_build_skipped": false
+    },
+    "returncode": 0,
+    "run_id": "b2924ad8-1949-45ab-b712-21dbd07628bc"
+  },
+  "system": {
+    "executor": "hooks",
+    "draining": false,
+    "version": "0.2.0"
+  },
+  "lanes": {
+    "items": [
+      {
+        "active_run_id": null,
+        "blocked_reason": null,
+        "config_version": 1,
+        "descendant_coverage_enabled": true,
+        "enabled": true,
+        "environment": "dev",
+        "executor_kind": "hooks",
+        "failure_paused": false,
+        "generation": 2,
+        "id": "autotask-dev",
+        "preemption_enabled": false,
+        "profile_digest": "076aa27e35ad8238eb659b1df150f9ff8c82d8a18f195bcb09f335aa46694cb9",
+        "project": "autotask",
+        "release_line_id": "autotask:e21ef8c26b5d1386"
+      },
+      {
+        "active_run_id": null,
+        "blocked_reason": null,
+        "config_version": 1,
+        "descendant_coverage_enabled": true,
+        "enabled": false,
+        "environment": "prod",
+        "executor_kind": "hooks",
+        "failure_paused": false,
+        "generation": 0,
+        "id": "autotask-prod",
+        "preemption_enabled": false,
+        "profile_digest": "655238d42b2edb25b608ac8aea796da72620d1172c04f72116c57d8534fd734e",
+        "project": "autotask",
+        "release_line_id": "autotask:e21ef8c26b5d1386"
+      }
+    ]
+  },
+  "independent_job_unit": {
+    "Result": "success",
+    "ExecMainCode": "1",
+    "ExecMainStatus": "0",
+    "ActiveState": "active",
+    "SubState": "exited"
+  }
+}
