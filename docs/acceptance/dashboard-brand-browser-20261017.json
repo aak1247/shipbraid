@@ -1,0 +1,59 @@
+{
+  "loginDesktop": {
+    "title": "Shipbraid · 发布协调台",
+    "brand": "shipbraid",
+    "logoLoaded": true,
+    "favicon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "touchIcon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "viewport": 1440,
+    "scrollWidth": 1440,
+    "oldBrandVisible": false
+  },
+  "faviconStatus": 200,
+  "loginMobile": {
+    "title": "Shipbraid · 发布协调台",
+    "brand": "shipbraid",
+    "logoLoaded": true,
+    "favicon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "touchIcon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "viewport": 390,
+    "scrollWidth": 390,
+    "oldBrandVisible": false
+  },
+  "dashboardDesktop": {
+    "title": "Shipbraid · 发布协调台",
+    "brand": "shipbraid",
+    "logoLoaded": true,
+    "favicon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "touchIcon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "viewport": 1440,
+    "scrollWidth": 1440,
+    "oldBrandVisible": false
+  },
+  "dashboardMobile": {
+    "title": "Shipbraid · 发布协调台",
+    "brand": "shipbraid",
+    "logoLoaded": true,
+    "favicon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "touchIcon": "http://127.0.0.1:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "viewport": 390,
+    "scrollWidth": 390,
+    "oldBrandVisible": false
+  },
+  "browserStorage": {
+    "local": 0,
+    "session": 0
+  },
+  "lanEntry": {
+    "title": "Shipbraid · 发布协调台",
+    "brand": "shipbraid",
+    "logoLoaded": true,
+    "favicon": "http://172.168.3.70:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "touchIcon": "http://172.168.3.70:8787/assets/shipbraid-logo-DrDvCjAP.png",
+    "viewport": 390,
+    "scrollWidth": 390,
+    "oldBrandVisible": false
+  },
+  "lanFaviconStatus": 200,
+  "pageErrors": []
+}

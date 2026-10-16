@@ -134,3 +134,5 @@ AutoTask 的 `pnpm deploy:local` 通过 HTTP 提交并等待，具体 worker 在
 Dashboard 的独立静态资源发布目录为 `~/.local/share/shipbraid/dashboard-releases/<commit>-<digest>/web`。仅前端更新时，构建 `web/dist`，复制到新的不可变目录，切换私有配置中的 `dashboard_dir` 后重启协调器；执行器路径、lane 配置和 profile 指纹保持原值，启动后核对现有任务所有权。完整程序/执行器升级仍遵循上面的排空流程。宽详情与 tail 日志的浏览器及发布证据见 [dashboard-tail-20261016.json](acceptance/dashboard-tail-20261016.json)。
 
 失败恢复与重复观察修复的本机验收见 [2026-10-17 记录](acceptance/hook-failure-recovery-20261017.json)。该次维护保留旧安装的 unit、数据目录和冻结执行器配置，只更新协调器及只读失败观察器；旧失败请求进入需处理，未重试发布，生产仍禁用。
+
+Shipbraid 名称、页内 Logo 与浏览器图标的静态资源更新见[品牌发布记录](acceptance/dashboard-brand-20261017.json)及[桌面/手机浏览器验证](acceptance/dashboard-brand-browser-20261017.json)。此次只切换 `dashboard_dir`，保留既有二进制、执行器配置、通道所有权和发布结果；已有浏览器页面刷新后加载新资源。
