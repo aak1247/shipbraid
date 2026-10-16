@@ -13,3 +13,5 @@
 /web/dist/
 /.impeccable/review/
 /.impeccable/context*
+
+__pycache__/

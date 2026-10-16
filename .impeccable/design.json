@@ -1,0 +1,344 @@
+{
+  "schemaVersion": 2,
+  "generatedAt": "2026-10-16T18:50:20+08:00",
+  "title": "Design System: Auto-Deliver Dashboard",
+  "extensions": {
+    "colorMeta": {
+      "ground": {
+        "role": "neutral",
+        "displayName": "Cool Canvas",
+        "tonalRamp": [
+          "#1d2421",
+          "#38403c",
+          "#555e59",
+          "#737c77",
+          "#929b96",
+          "#b2bbb6",
+          "#d2dbd6",
+          "#f2f3f1"
+        ]
+      },
+      "surface": {
+        "role": "neutral",
+        "displayName": "Ledger Paper",
+        "tonalRamp": [
+          "#1d2722",
+          "#39433e",
+          "#56615b",
+          "#747f79",
+          "#939e98",
+          "#b3beb8",
+          "#d3ded8",
+          "#fbfcfa"
+        ]
+      },
+      "raised": {
+        "role": "neutral",
+        "displayName": "Raised Paper",
+        "tonalRamp": [
+          "#222a26",
+          "#3e4642",
+          "#5b635f",
+          "#797f7c",
+          "#989d9a",
+          "#b8bcba",
+          "#d9dcda",
+          "#fff"
+        ]
+      },
+      "ink": {
+        "role": "neutral",
+        "displayName": "Graphite Ink",
+        "tonalRamp": [
+          "#17221f",
+          "#303a37",
+          "#4c5652",
+          "#69736f",
+          "#87918d",
+          "#a6b0ac",
+          "#c6cfcb",
+          "#e7eeeb"
+        ]
+      },
+      "muted": {
+        "role": "neutral",
+        "displayName": "Soft Graphite",
+        "tonalRamp": [
+          "#202a26",
+          "#39433f",
+          "#535d59",
+          "#6c7772",
+          "#87918d",
+          "#a2aca7",
+          "#bec7c2",
+          "#dbe1de"
+        ]
+      },
+      "line": {
+        "role": "neutral",
+        "displayName": "Divider Gray",
+        "tonalRamp": [
+          "#252d29",
+          "#414945",
+          "#5e6662",
+          "#7b837f",
+          "#999f9c",
+          "#b7bdb9",
+          "#d5dad7",
+          "#f2f4f2"
+        ]
+      },
+      "accent": {
+        "role": "primary",
+        "displayName": "Ledger Green",
+        "tonalRamp": [
+          "#0c281f",
+          "#10402f",
+          "#135a40",
+          "#176b56",
+          "#39816a",
+          "#649984",
+          "#9bbda9",
+          "#dcece3"
+        ]
+      },
+      "urgent": {
+        "role": "secondary",
+        "displayName": "Urgent Rust",
+        "tonalRamp": [
+          "#351a0d",
+          "#582a13",
+          "#7f391b",
+          "#aa4b1f",
+          "#c46c3f",
+          "#d89270",
+          "#e8bba4",
+          "#f8e8df"
+        ]
+      },
+      "attention": {
+        "role": "secondary",
+        "displayName": "Attention Ochre",
+        "tonalRamp": [
+          "#2d210b",
+          "#4c360d",
+          "#6c4a0d",
+          "#8d5a0c",
+          "#a87526",
+          "#c1954f",
+          "#d9b983",
+          "#f1e3c8"
+        ]
+      },
+      "success": {
+        "role": "tertiary",
+        "displayName": "Verified Green",
+        "tonalRamp": [
+          "#122719",
+          "#1b4028",
+          "#235937",
+          "#28714e",
+          "#4a895f",
+          "#75a17e",
+          "#a9c3ad",
+          "#e3eee5"
+        ]
+      },
+      "failure": {
+        "role": "tertiary",
+        "displayName": "Failure Red",
+        "tonalRamp": [
+          "#321314",
+          "#541e20",
+          "#792b2d",
+          "#a73e3e",
+          "#be625e",
+          "#d38982",
+          "#e5b4ad",
+          "#f5e1dd"
+        ]
+      },
+      "attention-soft": {
+        "role": "neutral",
+        "displayName": "Attention Wash",
+        "tonalRamp": [
+          "#33270f",
+          "#4e3b15",
+          "#6b511a",
+          "#8d6a25",
+          "#ad8540",
+          "#c9a265",
+          "#e2c99a",
+          "#fbf1dc"
+        ]
+      },
+      "success-soft": {
+        "role": "neutral",
+        "displayName": "Success Wash",
+        "tonalRamp": [
+          "#1c3122",
+          "#2d4933",
+          "#416548",
+          "#5b805f",
+          "#7a9c7c",
+          "#9fba9f",
+          "#c5d8c6",
+          "#e7f3eb"
+        ]
+      },
+      "failure-soft": {
+        "role": "neutral",
+        "displayName": "Failure Wash",
+        "tonalRamp": [
+          "#321a1a",
+          "#4d2929",
+          "#693a39",
+          "#87504e",
+          "#a56a67",
+          "#c18a85",
+          "#dcafa8",
+          "#f9e9e7"
+        ]
+      }
+    },
+    "typographyMeta": {
+      "body": {
+        "displayName": "Interface Sans",
+        "purpose": "System UI with Chinese-capable fallbacks for explanatory copy, controls, and table labels; 14px base size."
+      },
+      "label": {
+        "displayName": "Compact Label",
+        "purpose": "Dense statuses and secondary operational metadata; minimum 12px."
+      },
+      "data": {
+        "displayName": "Machine Data Mono",
+        "purpose": "IDs, revisions, digests, sequence values, and timestamps; minimum 12px."
+      }
+    },
+    "shadows": [
+      {
+        "name": "selected-control",
+        "value": "0 1px 2px rgba(20, 42, 32, 0.09)",
+        "purpose": "Separate the active lane or view control from its quiet surface."
+      }
+    ],
+    "motion": [
+      {
+        "name": "state-transition",
+        "value": "background-color 140ms ease, border-color 160ms ease",
+        "purpose": "Quiet hover and selection feedback without shifting ledger rows."
+      },
+      {
+        "name": "reduced-motion",
+        "value": "prefers-reduced-motion: reduce",
+        "purpose": "Removes long transitions and repeating skeleton or spinner motion."
+      }
+    ],
+    "breakpoints": [
+      {
+        "name": "mobile",
+        "value": "740px"
+      },
+      {
+        "name": "compact",
+        "value": "430px"
+      }
+    ]
+  },
+  "components": [
+    {
+      "name": "Primary Connection Button",
+      "kind": "button",
+      "refersTo": "button-primary",
+      "description": "The connection form action verifies a locally supplied bearer token; it does not create a release request or start a run.",
+      "html": "<button class=\"primary-button connect-submit\" type=\"submit\">连接协调器</button>",
+      "css": ".primary-button { display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 39px; padding: 0 14px; color: #fff; background: #176b56; border: 1px solid #176b56; border-radius: 5px; font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; cursor: pointer; } .primary-button:hover:not(:disabled) { background: #0f5b47; transform: translateY(-1px); } .primary-button:focus-visible { outline: 3px solid #287e68; outline-offset: 2px; }"
+    },
+    {
+      "name": "Token Input",
+      "kind": "input",
+      "refersTo": "input-token",
+      "description": "A raised token field with a separate labeled visibility control; the token stays in page memory.",
+      "html": "<label for=\"access-token\">客户端令牌</label><div class=\"token-field\"><input id=\"access-token\" type=\"password\" /><button class=\"token-visibility\" type=\"button\" aria-label=\"显示令牌\">显示</button></div>",
+      "css": ".token-field { display: flex; align-items: center; min-height: 40px; padding: 0 9px; color: #17221f; background: #fff; border: 1px solid #bdcac2; border-radius: 5px; } .token-field:focus-within { border-color: #559078; box-shadow: 0 0 0 3px rgba(23, 107, 86, .12); } .token-field input { min-width: 0; flex: 1; height: 38px; color: #1f3026; background: transparent; border: 0; outline: 0; font: 12px 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; } .connect-form label { color: #3c4d43; font: 600 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; }"
+    },
+    {
+      "name": "Lane Navigation Item",
+      "kind": "nav",
+      "refersTo": "nav-lane-selected",
+      "description": "The selected lane uses a raised surface and a narrow leading green rule; lane labels and identifiers come from the API.",
+      "html": "<nav class=\"lane-list\" aria-label=\"发布通道\"><button class=\"lane-item is-current\" type=\"button\" aria-current=\"page\"><span class=\"lane-project\">{lane.project}</span><span class=\"lane-environment\">{lane.environment}</span><span class=\"lane-id\">{lane.id}</span></button></nav>",
+      "css": ".lane-item { position: relative; display: block; width: 100%; padding: 11px 10px 9px; color: #17221f; background: transparent; border: 1px solid transparent; border-radius: 6px; text-align: left; cursor: pointer; } .lane-item.is-current { background: #fff; border-color: #cbd9d0; box-shadow: 0 1px 2px rgba(20, 42, 32, .035); } .lane-item.is-current::before { position: absolute; top: 8px; bottom: 8px; left: -1px; width: 2px; content: ''; background: #176b56; } .lane-project, .lane-environment { display: block; font: 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; } .lane-id { display: block; font: 12px 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; }"
+    },
+    {
+      "name": "State Chip",
+      "kind": "chip",
+      "refersTo": "chip-status",
+      "description": "A status dot is paired with its readable state label and pale state-tinted surface.",
+      "html": "<span class=\"status-badge tone-active\"><span class=\"status-dot\" aria-hidden=\"true\"></span>{statusLabel}</span>",
+      "css": ".status-badge { display: inline-flex; align-items: center; gap: 5px; min-height: 19px; padding: 2px 6px; color: #5a6861; background: #eef1ef; border: 1px solid #e0e5e1; border-radius: 4px; font: 400 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; } .tone-active { color: #245e48; background: #e8f1ec; border-color: #d8e7dd; } .tone-active .status-dot { background: #33805a; }"
+    },
+    {
+      "name": "Record Type Button Group",
+      "kind": "button-group",
+      "description": "Requests and runs are distinct views selected with native buttons; the selected state is announced through aria-pressed. The event and log controls use the same pattern.",
+      "html": "<div class=\"view-switch\" role=\"group\" aria-label=\"记录类型\"><button type=\"button\" aria-pressed=\"true\" class=\"is-selected\">请求</button><button type=\"button\" aria-pressed=\"false\">执行</button></div>",
+      "css": ".view-switch { display: flex; align-items: center; gap: 3px; padding: 3px; background: #e7ebe8; border-radius: 6px; } .view-switch button { display: flex; align-items: center; min-height: 31px; padding: 0 9px; color: #5b6962; background: transparent; border: 0; border-radius: 4px; font: 400 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; cursor: pointer; } .view-switch button.is-selected { color: #1c4937; background: #fff; box-shadow: 0 1px 2px rgba(20, 42, 32, .09); }"
+    },
+    {
+      "name": "Selected Ledger Row",
+      "kind": "custom",
+      "description": "Semantic request or run table cells keep status, revision, priority, relationship, and time aligned; selection adds a soft fill and leading rule.",
+      "html": "<table class=\"record-table\"><tbody><tr class=\"is-active\"><td>{status}</td><td><code>{revision}</code></td><td>{priority}</td><td>{relatedRun}</td><td>{createdAt}</td></tr></tbody></table>",
+      "css": ".record-table { width: 100%; border-collapse: collapse; text-align: left; white-space: nowrap; } .record-table th, .record-table td { font: 400 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; } .record-table td { height: 66px; padding: 8px 9px; border-bottom: 1px solid #e8ece9; } .record-table tbody tr.is-active { background: #edf4f0; } .record-table tbody tr.is-active td:first-child { box-shadow: inset 2px 0 #176b56; }"
+    },
+    {
+      "name": "Simulated Verification Receipt",
+      "kind": "custom",
+      "description": "A ScriptedExecutor receipt is explicitly labeled as simulated and exposes the source run, source revision, observation time, digests, and verification report.",
+      "html": "<section class=\"receipt-panel\" aria-label=\"部署验收回执\"><div class=\"receipt-heading\"><span>模拟验收回执</span><span class=\"receipt-result\">模拟验收结果</span></div><div class=\"receipt-grid\"><div class=\"detail-field\"><span>验收来源 SHA</span><strong><code>{receipt.source_revision}</code></strong></div><div class=\"detail-field\"><span>观察时间</span><strong>{receipt.observed_at}</strong></div></div><details class=\"verification-report\"><summary>验收报告 <span>ScriptedExecutor 模拟证据</span></summary><pre>{receipt.verification_report}</pre></details></section>",
+      "css": ".receipt-panel { margin: 9px 0 12px; padding: 10px; color: #3c654b; background: #f1f6f2; border: 1px solid #d9e7dc; border-radius: 5px; } .receipt-heading { display: flex; align-items: center; justify-content: space-between; gap: 8px; padding-bottom: 8px; border-bottom: 1px solid #dce8de; font: 650 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; } .receipt-result, .verification-report summary { font: 400 12px system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', 'Noto Sans SC', 'Microsoft YaHei', sans-serif; } .receipt-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 11px 8px; padding: 10px 0 5px; } .receipt-grid .detail-field > span, .receipt-grid .detail-field > strong { font-size: 12px; } .verification-report pre { max-height: 220px; padding: 8px; overflow: auto; font: 12px/1.55 'SFMono-Regular', Consolas, 'Liberation Mono', monospace; white-space: pre-wrap; overflow-wrap: anywhere; }"
+    }
+  ],
+  "narrative": {
+    "northStar": "The Dispatch Ledger",
+    "overview": "The Dispatch Ledger treats release coordination as a record-keeping job. Stable rows, aligned identifiers, narrow state labels, and a clear request-to-run link make it quick to scan what is waiting and inspect what actually happened. The interface is quiet and precise, with green reserved for connection, selection, and verified success; warm colors identify urgency or uncertainty.\n\nThe ledger is the primary working surface. Requests and executions remain separate records, while the inspector carries their relationship, phase history, receipt, and bounded logs. It uses only records returned by the service and keeps unresolved ownership explicit. Its compact operational density is a deliberate fit for developer and release-owner workflows.",
+    "keyCharacteristics": [
+      "Request and execution identity remain distinct.",
+      "State color always appears with a readable label.",
+      "Borders, alignment, and surface tone carry most of the hierarchy.",
+      "Verification details remain traceable to their source execution."
+    ],
+    "rules": [
+      {
+        "name": "The Paired-State Rule",
+        "body": "A state color never carries meaning alone; retain the status word or an explanatory sentence beside it.",
+        "section": "colors"
+      },
+      {
+        "name": "The Data-Only Mono Rule",
+        "body": "Keep monospace on machine identifiers and numeric evidence; use the interface sans for explanatory text.",
+        "section": "typography"
+      },
+      {
+        "name": "The Flat-By-Default Rule",
+        "body": "Use borders and surface changes for structure; reserve shadows for compact selected controls.",
+        "section": "elevation"
+      }
+    ],
+    "dos": [
+      "Keep the request and execution ledgers visibly distinct.",
+      "Show the request’s current run or the historical run that satisfied it.",
+      "Make unknown ownership and superseded execution status explicit in words.",
+      "Keep IDs, revisions, and receipt evidence easy to copy and inspect.",
+      "Respect reduced-motion preferences and visible keyboard focus."
+    ],
+    "donts": [
+      "Don't invent sample records, summary metrics, or activity in the live view.",
+      "Don't imply that a superseded run means its request failed.",
+      "Don't use state colors without text labels.",
+      "Don't make the page scroll horizontally on a phone.",
+      "Don't persist bearer tokens in browser storage."
+    ]
+  }
+}
