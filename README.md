@@ -1,45 +1,83 @@
 # auto-deliver
 
-用 Rust 构建的发布任务协调器。
+Rust 发布请求协调器，附带 React + TypeScript + Tailwind Dashboard。
 
-它统一接收“把这些改动上线”的请求，判断已有任务能否覆盖需求，合并重复工作，按优先级安全抢占，并把最终发布结果回传给所有关联请求。
+它管理的是“上线需求”：已有执行覆盖需求时共享结果；紧急版本可以安全替代尚可停止的普通执行，旧请求继续等待后继验收。执行被替代后保留 `superseded`，请求只有拿到匹配的验收证据才会 `satisfied`。
 
-## 核心场景
+当前 M1 使用 **ScriptedExecutor 模拟执行器**。阶段、取消确认、日志和验收均来自本地模拟账本，**不会调用真实构建、GitHub Actions 或生产部署**。真实 CI 适配器属于 M2。
 
-- A、B 请求可以由同一版本满足时，共享一次执行和验收结果。
-- 普通执行 X 正在构建，紧急请求需要版本 Y；若 Y 覆盖 X 的请求且 X 可安全停止，则切换到 Y。
-- 被替代的执行保留为 superseded；原请求继续等待，Y 验收成功后再一起成功。
-- 取消请求已发送，但无法确认旧执行停止时，不放行下一次环境写入。
-- 新批次失败不意味着旧请求已满足；按明确的重试预算继续处理，或进入需人工处理状态。
+## 本地运行
 
-## 定位
+需要 Rust ≥ 1.94、Git、Node.js 24、pnpm 11。当前验证环境和结果见 [验收记录](docs/acceptance/m1.md)。
 
-auto-deliver 管理请求、执行、覆盖关系、优先级和结果归属。GitHub Actions、现有发布脚本或将来的 Dagger 接入负责具体构建与部署。
+```bash
+cargo build --locked
+mkdir -p data
+# 受信的本地 bare mirror；协调器不会按客户端输入拉取仓库。
+git clone --mirror . data/source.git
+export AUTO_DELIVER_TOKEN="$(openssl rand -hex 32)"
+export AUTO_DELIVER_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
+cargo run --locked -- serve --config examples/local.toml
+```
 
-第一阶段采用单个 Rust 服务、SQLite 持久化状态、HTTP API 和 CLI，不引入 Redis、Temporal、消息总线或 Web 控制台。
+另一个终端启动 Dashboard：
 
-## 设计文件
+```bash
+cd web
+pnpm install --frozen-lockfile
+pnpm dev
+```
 
-1. [设计文档](docs/design.md)：领域模型、覆盖规则、调度状态机、抢占、恢复、安全和验收。
-2. [执行计划](docs/execution-plan.md)：M1 调度内核与 M2 GitHub Actions 接入的范围、任务和完成条件。
+打开 `http://127.0.0.1:5187`，手动输入第一个终端的 `AUTO_DELIVER_TOKEN`。令牌只保存在当前页面内存中。Vite 将 API 请求代理到 `127.0.0.1:8787`；Dashboard 不内置凭据或示例状态。
 
-当前只完成设计，没有可运行的服务、Cargo 工程或已接通的发布环境。文档中的 API、CLI、Rust 类型及目录均是拟议契约。
+Dashboard 可查看通道、请求与实际执行、优先级、阶段、替代关系、审计时间线和游标日志。M1 为只读界面，提交和运维控制使用 API/CLI。
 
-## 最重要的区别
+## 提交与等待
 
-| 对象 | 含义 | 被新执行替代后 |
-| --- | --- | --- |
-| ReleaseRequest | 调用者的上线需求 | 仍然存在，改为等待新的覆盖执行 |
-| DeliveryRun | 某一版本的一次实际执行 | 保留 superseded 终态和替代原因 |
-| DeploymentReceipt | 已验证的环境状态与产物证据 | 用于判断请求是否真的被满足 |
+在相同令牌环境的终端中：
 
-成功的对象是“请求得到满足”，不伪造“被停止的命令运行成功”。
+```bash
+REVISION=$(git rev-parse HEAD)
+cargo run --locked -- submit --lane demo-test --revision "$REVISION" \
+  --components app --idempotency-key example-001
+# 使用返回的 id；等待超时不撤回服务端请求。
+cargo run --locked -- wait REQUEST_ID --timeout-seconds 120
+cargo run --locked -- list request --lane demo-test
+cargo run --locked -- inspect run RUN_ID
+cargo run --locked -- logs RUN_ID
+```
 
-## 实施顺序
+同一个幂等键重试必须保持相同正文。需要允许后代提交覆盖时显式传 `--coverage descendant`；Git 祖先关系只证明版本历史，不能证明功能没有被 revert。紧急请求使用 `--priority urgent`，同时需要令牌与通道授权。
 
-- **M1**：完整实现两条核心调度规则，提供持久化 API/CLI，用可控执行器验证并发、抢占和崩溃恢复。该阶段不写真实生产环境。
-- **M2**：首个真实 GitHub Actions 执行器，接入独立发布仓库；在测试环境证明关联、取消确认、部署阶段互斥和产物验收后，再配置生产目标。
+`wait` 退出码：0 已满足、2 需处理、3 过期、4 撤回、124 本地等待超时、1 调用或配置错误。
 
-## 贡献
+配置样例使用独立操作者与执行器令牌。默认 loopback；对外访问需要受控 TLS 入口。通道权限、组件、仓库、发布线、配置摘要和抢占开关都由服务端配置，调用方不能提交任意命令或仓库地址。配置修改采用 drain 后重启。
 
-实现时先阅读 [AGENTS.md](AGENTS.md)。任何改变覆盖语义、执行状态或环境互斥的修改，必须同步设计、执行计划和对应场景验证。
+## 检查
+
+```bash
+cargo fmt --all --check
+cargo clippy --locked --all-targets -- -D warnings
+cargo test --locked
+cargo build --locked
+python3 scripts/acceptance.py
+cd web
+pnpm typecheck
+pnpm test
+pnpm build
+```
+
+进程验收脚本只使用临时 Git 仓库、SQLite 和随机临时令牌。涵盖并发共享、幂等冲突、紧急替代、已覆盖紧急请求不重启、CLI 超时、SIGKILL 恢复与鉴权。
+
+## 运行边界
+
+单实例、单本地持久卷，SQLite WAL + FULL、启动独占锁；不使用 NFS。停止命令被接受不代表已经停止，未知状态继续占有通道，不能靠超时解锁。Dashboard 轮询不是调度事实源。
+
+数据库备份应使用 SQLite 在线备份 API；不要在活动 WAL 状态下只复制 `.db` 文件。首次真实 CI 接入必须验证执行器身份、取消停止证明、部署阶段准入和独立环境验收；模拟器通过不代表真实部署已验收。当前环境新鲜证据复用、可配置自动重试、公平策略、完整故障矩阵和阶段指标仍待补齐；性能验收结果见 [验收记录](docs/acceptance/m1.md)。具体实现覆盖与待验收项以 [执行计划](docs/execution-plan.md) 为准。
+
+## 设计与实施
+
+- [设计文档](docs/design.md)
+- [执行计划与任务状态](docs/execution-plan.md)
+- [前后端实施契约](docs/implementation-contract.md)
+- [Agent 工作约束](AGENTS.md)

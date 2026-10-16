@@ -1,0 +1,10 @@
+{
+  "kind": "aborted_baseline",
+  "source_commit": "1bee0fc",
+  "executor": "scripted",
+  "scheduled_rate": 50,
+  "scheduled_seconds": 60,
+  "scheduled_requests": 3000,
+  "accepted_at_observation": 2381,
+  "note": "Git resolution moved outside the writer lock. Stopped due to growing HTTP backlog; not a completed NFR-001 run. Full-history persistence serialization identified as the next bottleneck."
+}

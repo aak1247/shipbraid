@@ -10,6 +10,7 @@
 - Review gate status：PASS。
 - Linked review report：[§13 设计评审与反馈](#13-review-feedback-tracking)。
 - Linked execution plan：[execution-plan.md](execution-plan.md)。
+- Implementation checkpoint：[首批实现与未完成项](acceptance/m1.md)；设计批准不代表全部 M1 已实现。
 
 ## 2. Context and Problem
 

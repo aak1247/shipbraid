@@ -1,0 +1,19 @@
+{
+  "executor": "scripted",
+  "rate": 50,
+  "scheduled_seconds": 60,
+  "total_seconds": 162.323,
+  "submitted": 3000,
+  "statuses": {
+    "202": 3000
+  },
+  "p50_ms": 1452.377,
+  "p95_ms": 14265.768,
+  "includes_trusted_git_resolution": true,
+  "nfr_001_pass": false,
+  "source_commit": "14fe6af",
+  "binary_profile": "release",
+  "real_deployments": 0,
+  "accepted_and_satisfied_at_final_database_observation": 3000,
+  "note": "Mixed-use host. End-to-end response latency includes trusted Git resolution; pure already-resolved ledger latency has not been measured independently. Submission backlog extends wall time beyond the scheduled 60 seconds."
+}

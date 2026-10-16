@@ -1,0 +1,15 @@
+{
+  "kind": "aborted_baseline",
+  "source_commit": "8aee6564e0b07c57cc1029d86c339b2d9dc2255f",
+  "executor": "scripted",
+  "scheduled_rate": 50,
+  "scheduled_seconds": 60,
+  "scheduled_requests": 3000,
+  "elapsed_seconds_before_abort": 222,
+  "accepted_at_observation": 1658,
+  "statuses_at_observation": {
+    "satisfied": 1651,
+    "waiting": 7
+  },
+  "note": "Stopped due to a growing HTTP backlog; this is not a completed NFR-001 acceptance run. Includes trusted Git resolution and concurrent local compile activity."
+}
