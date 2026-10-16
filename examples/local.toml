@@ -1,0 +1,34 @@
+# ScriptedExecutor only: no external builds or deployments are executed.
+listen = "127.0.0.1:8787"
+database_path = "../data/local.db"
+max_active_runs = 2
+tick_ms = 250
+scripted_phase_ms = 3000
+coalesce_ms = 2000
+cancel_timeout_seconds = 60
+
+[[tokens]]
+id = "local-operator"
+token_env = "AUTO_DELIVER_TOKEN"
+lanes = ["demo-test"]
+urgent = true
+admin = true
+executor = false
+
+[[tokens]]
+id = "local-executor"
+token_env = "AUTO_DELIVER_EXECUTOR_TOKEN"
+lanes = ["demo-test"]
+executor = true
+
+[[lanes]]
+id = "demo-test"
+project = "demo"
+environment = "test"
+repository_id = "auto-deliver"
+repository_path = "../data/source.git"
+release_ref = "refs/heads/main"
+profile_digest = "local-scripted-v1"
+components = ["app", "api"]
+allow_descendant = true
+allow_preemption = true
