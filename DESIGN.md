@@ -1,5 +1,5 @@
 ---
-name: Auto-Deliver Dashboard
+name: Shipbraid Dashboard
 description: A compact release coordination ledger for tracking requests, executions, and verification evidence.
 colors:
   ground: "#f2f3f1"
@@ -69,7 +69,7 @@ components:
     padding: "11px 10px 9px"
 ---
 
-# Design System: Auto-Deliver Dashboard
+# Design System: Shipbraid Dashboard
 
 ## Overview
 

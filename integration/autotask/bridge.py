@@ -137,8 +137,13 @@ def context(envelope, args):
     if not re.fullmatch(r'[a-fA-F0-9]{40}|[a-fA-F0-9]{64}', target['revision']) or target['components'] != ['app']:
         raise RuntimeError('unexpected frozen deployment target')
     directory = args.state_dir.resolve() / identifier
-    unit = f'auto-deliver-autotask-{identifier}-{generation}.service'
-    if run.get('executor_ref') not in (None, unit):
+    unit = f'shipbraid-autotask-{identifier}-{generation}.service'
+    # A rename must not orphan the durable identity of an already-started job.
+    legacy_unit = f'auto-deliver-autotask-{identifier}-{generation}.service'
+    recorded_ref = run.get('executor_ref')
+    if recorded_ref == legacy_unit:
+        unit = legacy_unit
+    elif recorded_ref not in (None, unit):
         raise RuntimeError('executor reference does not match the durable job identity')
     return run, target, directory, unit
 

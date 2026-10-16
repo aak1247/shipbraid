@@ -10,7 +10,7 @@ Shipbraid 协调开发者、Agent 和自动化提交的上线需求。兼容请�
 
 **当前状态：早期开发阶段。** 已实现本地模拟和可配置外部 hooks；首个真实接入已在 AutoTask 本机开发环境验收。安全抢占目前适用于模拟执行器，外部 hooks 整体不可抢占，随附集成的生产环境保持禁用。
 
-项目现名为 **Shipbraid**。为兼容已有安装，Cargo package、可执行文件、环境变量及现有服务路径暂时沿用 `auto-deliver`，以下命令使用这些现有名称。
+Cargo package 与可执行文件统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀，新安装使用 `shipbraid.service`。已有安装升级前请阅读[改名与升级说明](docs/naming.md)。
 
 ## 为什么需要 Shipbraid？
 
@@ -60,8 +60,8 @@ git clone --mirror . data/source.git
 # 示例配置信任 main；当前 checkout 在其他分支时也可演示。
 git --git-dir=data/source.git update-ref refs/heads/main "$(git rev-parse HEAD)"
 
-export AUTO_DELIVER_TOKEN="$(openssl rand -hex 32)"
-export AUTO_DELIVER_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
+export SHIPBRAID_TOKEN="$(openssl rand -hex 32)"
+export SHIPBRAID_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
 cargo run --locked -- serve --config examples/local.toml
 ```
 
@@ -69,7 +69,7 @@ API 监听 `http://127.0.0.1:8787`。该配置使用 **ScriptedExecutor**，模�
 
 ### 2. 提交请求
 
-在第二个终端进入仓库，将 `AUTO_DELIVER_TOKEN` 设置为上一步相同的操作者令牌。令牌应私密保存；CLI 也支持 `--token-file`。
+在第二个终端进入仓库，将 `SHIPBRAID_TOKEN` 设置为上一步相同的操作者令牌。令牌应私密保存；CLI 也支持 `--token-file`。
 
 ```bash
 REVISION=$(git rev-parse HEAD)

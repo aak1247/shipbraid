@@ -18,6 +18,32 @@ def quote(value):
     return json.dumps(str(value))
 
 
+def check_existing_installation(home):
+    """Refuse a second owner or an implicit migration of a legacy ledger."""
+    for unit in ('shipbraid.service', 'auto-deliver.service'):
+        state = subprocess.run(
+            ['systemctl', '--user', 'is-active', '--quiet', unit],
+            stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+        )
+        if state.returncode == 0:
+            raise SystemExit(
+                f'{unit} is active. Drain, settle active tasks and stop it before installation; '
+                'see docs/naming.md for the upgrade procedure'
+            )
+        if state.returncode not in (3, 4):
+            raise SystemExit('Cannot verify existing service ownership; installation stopped')
+    legacy_paths = (
+        home / '.config/auto-deliver',
+        home / '.local/share/auto-deliver',
+        home / '.config/systemd/user/auto-deliver.service',
+    )
+    if any(path.exists() or path.is_symlink() for path in legacy_paths):
+        raise SystemExit(
+            'Legacy installation detected. Preserve its database and executor identities; '
+            'follow docs/naming.md before installing shipbraid'
+        )
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--listen', default='127.0.0.1:8787')
@@ -32,19 +58,17 @@ def main():
     except ValueError:
         parser.error('This development installer only permits a loopback IP listener; use SSH forwarding or a separately reviewed HTTPS ingress')
     root = Path(__file__).resolve().parent.parent
-    binary = root / 'target/release/auto-deliver'
+    binary = root / 'target/release/shipbraid'
     dist = root / 'web/dist'
     if not binary.is_file() or not (dist / 'index.html').is_file():
         raise SystemExit('Run cargo build --release --locked and pnpm --dir web build first')
-    config = Path.home() / '.config/auto-deliver'
-    data = Path.home() / '.local/share/auto-deliver'
+    # Check both names before creating directories, copying releases or writing credentials.
+    check_existing_installation(Path.home())
+    config = Path.home() / '.config/shipbraid'
+    data = Path.home() / '.local/share/shipbraid'
     unit_dir = Path.home() / '.config/systemd/user'
     for directory in (config, data, data / 'releases', data / 'mirrors', unit_dir):
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
-    # Upgrades require operator review; never replace the execution profile under a live job.
-    active = subprocess.run(['systemctl', '--user', 'is-active', '--quiet', 'auto-deliver.service']).returncode == 0
-    if active:
-        raise SystemExit('Existing service is active. Drain, settle active tasks and stop it before this installer upgrades the immutable release/config')
     revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
     deploy_source_commit = subprocess.check_output(['git', '-C', str(args.autotask_repository), 'rev-parse', '--verify', '--end-of-options', args.autotask_script_ref + '^{commit}'], text=True).strip()
     deploy_source = subprocess.check_output(['git', '-C', str(args.autotask_repository), 'show', deploy_source_commit + ':scripts/deploy-local.sh'])
@@ -53,7 +77,7 @@ def main():
     if not release.exists():
         with tempfile.TemporaryDirectory(prefix='.install-', dir=data / 'releases') as temporary:
             staged = Path(temporary)
-            shutil.copy2(binary, staged / 'auto-deliver')
+            shutil.copy2(binary, staged / 'shipbraid')
             shutil.copytree(dist, staged / 'web')
             shutil.copy2(root / 'integration/autotask/bridge.py', staged / 'autotask-bridge.py')
             (staged / 'deploy-local.sh').write_bytes(deploy_source)
@@ -77,7 +101,7 @@ def main():
         path.chmod(0o600)
         values[name] = path.read_text().strip()
     env_file = config / 'tokens.env'
-    env_file.write_text('AUTO_DELIVER_OPERATOR_TOKEN=' + values['operator'] + '\nAUTO_DELIVER_ADMIN_TOKEN=' + values['admin'] + '\n')
+    env_file.write_text('SHIPBRAID_OPERATOR_TOKEN=' + values['operator'] + '\nSHIPBRAID_ADMIN_TOKEN=' + values['admin'] + '\n')
     env_file.chmod(0o600)
     script = release / 'autotask-bridge.py'
     config_text = f'''# Local development installation. Production is explicitly disabled.
@@ -89,12 +113,12 @@ tick_ms = 1000
 coalesce_ms = 2000
 [[tokens]]
 id = "local-dev-operator"
-token_env = "AUTO_DELIVER_OPERATOR_TOKEN"
+token_env = "SHIPBRAID_OPERATOR_TOKEN"
 lanes = ["autotask-dev"]
 urgent = true
 [[tokens]]
 id = "local-administrator"
-token_env = "AUTO_DELIVER_ADMIN_TOKEN"
+token_env = "SHIPBRAID_ADMIN_TOKEN"
 admin = true
 '''
     hook_args = ['--state-dir', str(data / 'autotask-runs'), '--repository', str(args.autotask_repository), '--deploy-checkout', str(args.autotask_checkout), '--deploy-script', str(release / 'deploy-local.sh')]
@@ -128,12 +152,12 @@ timeout_ms = 20000
     config_path.write_text(config_text)
     config_path.chmod(0o600)
     unit = f'''[Unit]
-Description=auto-deliver deployment coordinator and dashboard
+Description=shipbraid deployment coordinator and dashboard
 After=network.target
 [Service]
 Type=simple
 WorkingDirectory={data}
-ExecStart={release / 'auto-deliver'} serve --config {config_path}
+ExecStart={release / 'shipbraid'} serve --config {config_path}
 EnvironmentFile={env_file}
 Restart=on-failure
 RestartSec=3
@@ -143,20 +167,20 @@ NoNewPrivileges=true
 [Install]
 WantedBy=default.target
 '''
-    (unit_dir / 'auto-deliver.service').write_text(unit)
+    (unit_dir / 'shipbraid.service').write_text(unit)
     subprocess.run(['systemctl', '--user', 'daemon-reload'], check=True)
-    subprocess.run(['systemctl', '--user', 'enable', '--now', 'auto-deliver.service'], check=True)
+    subprocess.run(['systemctl', '--user', 'enable', '--now', 'shipbraid.service'], check=True)
     bin_dir = Path.home() / '.local/bin'
     bin_dir.mkdir(parents=True, exist_ok=True)
-    link = bin_dir / 'auto-deliver'
+    link = bin_dir / 'shipbraid'
     if link.exists() and not link.is_symlink():
-        raise SystemExit('Refusing to overwrite an existing non-symlink auto-deliver binary')
-    temporary = bin_dir / '.auto-deliver-install-link'
+        raise SystemExit('Refusing to overwrite an existing non-symlink shipbraid binary')
+    temporary = bin_dir / '.shipbraid-install-link'
     if temporary.is_symlink():
         temporary.unlink()
-    temporary.symlink_to(release / 'auto-deliver')
+    temporary.symlink_to(release / 'shipbraid')
     os.replace(temporary, link)
-    print(json.dumps({'unit': 'auto-deliver.service', 'listen': args.listen, 'release': str(release),
+    print(json.dumps({'unit': 'shipbraid.service', 'listen': args.listen, 'release': str(release),
         'config': str(config_path), 'operator_token_file': str(config / 'operator.token'),
         'admin_token_file': str(config / 'admin.token'), 'production_enabled': False}, indent=2))
 

@@ -1,4 +1,4 @@
-# auto-deliver 设计文档
+# shipbraid 设计文档
 
 ## 1. Document Control
 
@@ -281,7 +281,7 @@ receipt 的环境/组件/产物摘要必须由可信 verifier 读取实际目标
 
 首个调用方可以是 AutoTask 的发布动作：提交源 SHA 和目标 lane，保存 request_id，然后等待结果。独立项目不引入 AutoTask Session/Task 数据表或内部工具接口。
 
-独立发布仓库中的 GitHub Actions 负责可信的构建/发布步骤；auto-deliver 负责统一决策和状态。现有备份、审批、镜像来源校验、环境 diff 和部署验收继续由受控 profile 执行，调度合并不等于授权扩大。M2 先接测试 lane，真实生产接入有单独的审批与资源变更范围。
+独立发布仓库中的 GitHub Actions 负责可信的构建/发布步骤；shipbraid 负责统一决策和状态。现有备份、审批、镜像来源校验、环境 diff 和部署验收继续由受控 profile 执行，调度合并不等于授权扩大。M2 先接测试 lane，真实生产接入有单独的审批与资源变更范围。
 
 ## 8. Alternatives and Tradeoffs
 
@@ -307,7 +307,7 @@ receipt 的环境/组件/产物摘要必须由可信 verifier 读取实际目标
 | urgent 持续到达 | 普通请求饥饿 | 原截止时间不重置；等待年龄指标、expired、明确受影响请求 |
 | 权限或配置在等待中变化 | 越权部署/合并 | 计划时和不可逆阶段前都重新核对授权，profile 快照不跨版本合并；撤权使请求 needs_attention |
 
-不提供自动数据库业务回滚。部署失败后由 profile 和发布负责人执行既有恢复流程；auto-deliver 保留事实，不把 rollback 解释为原请求成功。
+不提供自动数据库业务回滚。部署失败后由 profile 和发布负责人执行既有恢复流程；shipbraid 保留事实，不把 rollback 解释为原请求成功。
 
 ## 10. Validation Strategy
 

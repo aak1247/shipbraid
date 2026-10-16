@@ -1,4 +1,4 @@
-# auto-deliver Agent Guide
+# shipbraid Agent Guide
 
 ## 项目边界
 

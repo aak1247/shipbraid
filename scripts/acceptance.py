@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Local, synthetic subprocess acceptance. No real workflows or deployments.
 
-Run after cargo build: python3 scripts/acceptance.py [--binary target/debug/auto-deliver]
+Run after cargo build: python3 scripts/acceptance.py [--binary target/debug/shipbraid]
 All credentials, Git fixtures and SQLite databases live in a TemporaryDirectory.
 """
 import argparse
@@ -22,11 +22,11 @@ import urllib.request
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/debug/auto-deliver")
+    parser.add_argument("--binary", default="target/debug/shipbraid")
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve())
     report = {"executor": "scripted", "checks": [], "real_deployments": 0}
-    with tempfile.TemporaryDirectory(prefix="auto-deliver-acceptance-") as directory:
+    with tempfile.TemporaryDirectory(prefix="shipbraid-acceptance-") as directory:
         base = Path(directory)
         repository = base / "repository"
         repository.mkdir()
@@ -46,7 +46,7 @@ def main():
         operator = secrets.token_urlsafe(40)
         scoped = secrets.token_urlsafe(40)
         executor = secrets.token_urlsafe(40)
-        env = {**os.environ, "AUTO_DELIVER_ACCEPTANCE_OPERATOR": operator, "AUTO_DELIVER_ACCEPTANCE_SCOPED": scoped, "AUTO_DELIVER_ACCEPTANCE_EXECUTOR": executor}
+        env = {**os.environ, "SHIPBRAID_ACCEPTANCE_OPERATOR": operator, "SHIPBRAID_ACCEPTANCE_SCOPED": scoped, "SHIPBRAID_ACCEPTANCE_EXECUTOR": executor}
         config = base / "config.toml"
         config.write_text(f'''database_path = "{base / 'ledger.db'}"
 listen = "127.0.0.1:{port}"
@@ -57,16 +57,16 @@ coalesce_ms = 1200
 cancel_timeout_seconds = 60
 [[tokens]]
 id = "operator"
-token_env = "AUTO_DELIVER_ACCEPTANCE_OPERATOR"
+token_env = "SHIPBRAID_ACCEPTANCE_OPERATOR"
 admin = true
 urgent = true
 [[tokens]]
 id = "scoped"
-token_env = "AUTO_DELIVER_ACCEPTANCE_SCOPED"
+token_env = "SHIPBRAID_ACCEPTANCE_SCOPED"
 lanes = ["synthetic-test"]
 [[tokens]]
 id = "executor"
-token_env = "AUTO_DELIVER_ACCEPTANCE_EXECUTOR"
+token_env = "SHIPBRAID_ACCEPTANCE_EXECUTOR"
 lanes = ["synthetic-test"]
 executor = true
 [[lanes]]
@@ -201,7 +201,7 @@ components = ["app"]
             request("/v1/lanes/synthetic-test/resolve-unknown", {"action":"adopt_running","evidence":"re-observe durable ScriptedExecutor identity","reason":"synthetic recovery acceptance"})
             assert request(f"/v1/runs/{running}")["state"] == "running"
             report["checks"].append("unknown retains ownership; human stop assertion rejected; independent scripted observation restores running")
-            timeout = subprocess.run([binary, "--url", url, "wait", pending["id"], "--timeout-seconds", "0"], env={**env, "AUTO_DELIVER_TOKEN":operator}, capture_output=True, text=True, timeout=10)
+            timeout = subprocess.run([binary, "--url", url, "wait", pending["id"], "--timeout-seconds", "0"], env={**env, "SHIPBRAID_TOKEN":operator}, capture_output=True, text=True, timeout=10)
             assert timeout.returncode == 124, timeout.stderr
             assert get_request(pending["id"])["status"] == "waiting"
             report["checks"].append("covered urgent promotes current run; CLI local timeout does not withdraw request")

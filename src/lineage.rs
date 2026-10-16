@@ -525,7 +525,7 @@ mod tests {
     impl TempGit {
         fn new() -> Self {
             let root =
-                std::env::temp_dir().join(format!("auto-deliver-lineage-{}", uuid::Uuid::new_v4()));
+                std::env::temp_dir().join(format!("shipbraid-lineage-{}", uuid::Uuid::new_v4()));
             fs::create_dir_all(&root).unwrap();
             Self { root }
         }

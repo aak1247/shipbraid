@@ -10,7 +10,7 @@ Shipbraid coordinates release requests from developers, agents, and automation. 
 
 **Status: early development.** Local simulation and configurable external hooks are implemented. The first real integration has been verified against an AutoTask local development environment. Safe preemption currently works with the simulated executor; external hooks are non-preemptible, and production is disabled in the supplied integration.
 
-The project is now called **Shipbraid**. The Cargo package, executable, environment variables, and existing service paths currently retain `auto-deliver` for compatibility. Commands below use those existing names.
+The Cargo package and executable are `shipbraid`; environment variables use `SHIPBRAID_`, and new installations use `shipbraid.service`. See the [rename and upgrade notes](docs/naming.md) before upgrading an existing installation.
 
 ## Why Shipbraid?
 
@@ -60,8 +60,8 @@ git clone --mirror . data/source.git
 # The sample config trusts main, even when the checkout uses a different branch.
 git --git-dir=data/source.git update-ref refs/heads/main "$(git rev-parse HEAD)"
 
-export AUTO_DELIVER_TOKEN="$(openssl rand -hex 32)"
-export AUTO_DELIVER_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
+export SHIPBRAID_TOKEN="$(openssl rand -hex 32)"
+export SHIPBRAID_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
 cargo run --locked -- serve --config examples/local.toml
 ```
 
@@ -69,7 +69,7 @@ The API listens on `http://127.0.0.1:8787`. This configuration uses **ScriptedEx
 
 ### 2. Submit a request
 
-In a second terminal, enter the repository and set `AUTO_DELIVER_TOKEN` to the same operator token used above. Keep tokens private; the CLI also supports `--token-file`.
+In a second terminal, enter the repository and set `SHIPBRAID_TOKEN` to the same operator token used above. Keep tokens private; the CLI also supports `--token-file`.
 
 ```bash
 REVISION=$(git rev-parse HEAD)

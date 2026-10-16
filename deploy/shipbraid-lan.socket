@@ -1,5 +1,5 @@
 [Unit]
-Description=auto-deliver LAN listener
+Description=shipbraid LAN listener
 
 [Socket]
 ListenStream=172.168.3.70:8787

@@ -45,7 +45,7 @@ def run_acceptance(binary, report):
         tokens = {principal: secrets.token_urlsafe(40) for principal in principals}
         env_names = {principal: f"SHIPBRAID_TEST_{principal.upper().replace('-', '_')}" for principal in principals}
         env = dict(os.environ)
-        env.pop("AUTO_DELIVER_TOKEN_FILE", None)
+        env.pop("SHIPBRAID_TOKEN_FILE", None)
         env.update({env_names[principal]: token for principal, token in tokens.items()})
         database = base / "ledger.db"
         config = base / "config.toml"
@@ -98,7 +98,7 @@ def run_acceptance(binary, report):
         def cli(principal, *arguments, timeout=20):
             result = subprocess.run(
                 [binary, "--json", "--url", url, *arguments],
-                env={**env, "AUTO_DELIVER_TOKEN": tokens[principal]},
+                env={**env, "SHIPBRAID_TOKEN": tokens[principal]},
                 capture_output=True, text=True, timeout=timeout,
             )
             assert result.returncode == 0, f"CLI {arguments[0]} failed with exit {result.returncode}"
@@ -275,7 +275,7 @@ def run_acceptance(binary, report):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/debug/auto-deliver")
+    parser.add_argument("--binary", default="target/debug/shipbraid")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     report = {"executor": "scripted", "checks": [], "real_deployments": 0}

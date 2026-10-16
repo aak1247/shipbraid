@@ -2181,7 +2181,7 @@ fn acquire_database_lock(database_path: &Path) -> anyhow::Result<DatabaseLock> {
         .with_context(|| format!("open database lock {}", lock_path.display()))?;
     lock_file.try_lock_exclusive().with_context(|| {
         format!(
-            "another auto-deliver process already owns database {}",
+            "another shipbraid process already owns database {}",
             database_path.display()
         )
     })?;

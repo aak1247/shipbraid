@@ -23,7 +23,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
-            database_path: "./data/auto-deliver.db".into(),
+            database_path: "./data/shipbraid.db".into(),
             listen: "127.0.0.1:8787".parse().unwrap(),
             tokens: vec![],
             lanes: vec![],

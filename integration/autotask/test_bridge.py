@@ -50,6 +50,21 @@ class BridgeTests(unittest.TestCase):
         self.assertEqual(result['executor_ref'], self.unit)
         start.assert_not_called()
 
+    def test_renamed_bridge_observes_existing_legacy_job_identity(self):
+        self.assertTrue(self.unit.startswith('shipbraid-autotask-'))
+        legacy_unit = f'auto-deliver-autotask-{self.identifier}-1.service'
+        self.envelope['run']['executor_ref'] = legacy_unit
+        self.record()
+        self.envelope['operation'] = 'observe'
+        with patch.object(bridge, 'unit_state', return_value={'LoadState': 'loaded', 'SubState': 'running'}) as observe, patch.object(bridge.subprocess, 'run') as start:
+            result = bridge.hook(self.envelope, self.args)
+        self.assertEqual(result['executor_ref'], legacy_unit)
+        observe.assert_called_once_with(legacy_unit)
+        start.assert_not_called()
+        self.envelope['run']['executor_ref'] = f'auto-deliver-autotask-{uuid.uuid4()}-1.service'
+        with self.assertRaises(RuntimeError):
+            bridge.context(self.envelope, self.args)
+
     def test_frozen_target_and_environment_cannot_be_replaced(self):
         self.record()
         changed = copy.deepcopy(self.envelope)

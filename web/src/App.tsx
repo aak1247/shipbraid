@@ -154,7 +154,7 @@ function ConnectionScreen({
           连接后读取当前服务中的通道、执行器与记录；模拟执行数据会明确标注。
         </div>
       </section>
-      <footer className="connect-footer">AUTO-DELIVER <span>发布请求协调台</span></footer>
+      <footer className="connect-footer">SHIPBRAID <span>发布请求协调台</span></footer>
     </main>
   );
 }
@@ -163,7 +163,7 @@ function Brand() {
   return (
     <div className="brand-lockup">
       <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
-      <span className="brand-word">auto-deliver</span>
+      <span className="brand-word">shipbraid</span>
     </div>
   );
 }

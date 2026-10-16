@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Measure API submissions. Requires an explicitly configured ScriptedExecutor server.
 
-No real deployment target is permitted. Credentials come from AUTO_DELIVER_TOKEN.
+No real deployment target is permitted. Credentials come from SHIPBRAID_TOKEN.
 """
 import argparse
 import concurrent.futures
@@ -25,7 +25,7 @@ def main():
     args = parser.parse_args()
     if args.rate <= 0 or args.seconds <= 0:
         parser.error("rate and seconds must be positive")
-    token = os.environ["AUTO_DELIVER_TOKEN"]
+    token = os.environ["SHIPBRAID_TOKEN"]
     base = args.url.rstrip("/")
     headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
     with urllib.request.urlopen(urllib.request.Request(base + "/v1/system", headers=headers), timeout=10) as response:

@@ -1943,7 +1943,7 @@ mod tests {
         let work = temp.path().join("work");
         std::fs::create_dir_all(&work).unwrap();
         git(&work, &["init", "-b", "release"]);
-        git(&work, &["config", "user.name", "Auto Deliver Test"]);
+        git(&work, &["config", "user.name", "Shipbraid Test"]);
         git(&work, &["config", "user.email", "test@example.invalid"]);
         std::fs::write(work.join("app.txt"), "synthetic fixture\n").unwrap();
         git(&work, &["add", "app.txt"]);
@@ -1965,7 +1965,7 @@ mod tests {
         );
 
         let token = format!("scoped-{}-credential-long-enough", Uuid::new_v4());
-        let token_env = format!("AUTO_DELIVER_TEST_TOKEN_{}", Uuid::new_v4().simple());
+        let token_env = format!("SHIPBRAID_TEST_TOKEN_{}", Uuid::new_v4().simple());
         // Rust 2024 marks process environment mutation unsafe; the test uses
         // a unique variable name and removes it immediately after resolution.
         unsafe { std::env::set_var(&token_env, &token) };

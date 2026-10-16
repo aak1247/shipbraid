@@ -16,7 +16,7 @@ Developers, agents, and release owners who submit or oversee requests to publish
 
 ## Product Purpose
 
-Auto-deliver coordinates persistent deployment requests and their execution records. Success means each request remains independently traceable through coverage, queueing, replacement, and verified completion, including when work is retried or superseded.
+Shipbraid coordinates persistent deployment requests and their execution records. Success means each request remains independently traceable through coverage, queueing, replacement, and verified completion, including when work is retried or superseded.
 
 ## Positioning
 
@@ -24,7 +24,7 @@ Requests and runs are separate records. A request becomes satisfied only through
 
 ## Operating Context
 
-Auto-deliver runs as a local, single-instance Rust service with SQLite. Each project/environment lane selects its own ScriptedExecutor or configured Hooks executor, which can use a fixed command, script, or webhook transport. The dashboard reads the service over its HTTP API and is used to inspect lanes, requests, runs, event history, and bounded executor logs. Development and production are separate lanes; production remains explicitly disabled unless an administrator enables it.
+Shipbraid runs as a local, single-instance Rust service with SQLite. Each project/environment lane selects its own ScriptedExecutor or configured Hooks executor, which can use a fixed command, script, or webhook transport. The dashboard reads the service over its HTTP API and is used to inspect lanes, requests, runs, event history, and bounded executor logs. Development and production are separate lanes; production remains explicitly disabled unless an administrator enables it.
 
 ## Capabilities and Constraints
 

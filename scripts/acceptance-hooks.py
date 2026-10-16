@@ -6,7 +6,7 @@ local child processes, and a loopback webhook receiver. Every receipt and
 external effect is synthetic; this script never invokes AutoTask or user units.
 
 Run after building the coordinator:
-  python3 scripts/acceptance-hooks.py [--binary target/debug/auto-deliver]
+  python3 scripts/acceptance-hooks.py [--binary target/debug/shipbraid]
 """
 from __future__ import annotations
 
@@ -486,13 +486,13 @@ def make_git_mirror(base: Path) -> tuple[Path, list[str]]:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/debug/auto-deliver")
+    parser.add_argument("--binary", default="target/debug/shipbraid")
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve())
     assert Path(binary).is_file(), f"coordinator binary not found: {binary}"
     report = {"fixture": "synthetic external hooks", "real_deployments": 0, "checks": []}
 
-    with tempfile.TemporaryDirectory(prefix="auto-deliver-hooks-acceptance-") as temp:
+    with tempfile.TemporaryDirectory(prefix="shipbraid-hooks-acceptance-") as temp:
         base = Path(temp)
         mirror, revisions = make_git_mirror(base)
         lane_specs = [
@@ -522,10 +522,10 @@ def main() -> None:
             listen_port = sock.getsockname()[1]
         url = f"http://127.0.0.1:{listen_port}"
         hook_secret = secrets.token_urlsafe(48)
-        hook_token_env = "AUTO_DELIVER_ACCEPTANCE_HOOK_BEARER"
+        hook_token_env = "SHIPBRAID_ACCEPTANCE_HOOK_BEARER"
         env_names = {
-            "admin": "AUTO_DELIVER_ACCEPTANCE_ADMIN",
-            **{lane["id"]: f"AUTO_DELIVER_ACCEPTANCE_{index}" for index, lane in enumerate(lanes)},
+            "admin": "SHIPBRAID_ACCEPTANCE_ADMIN",
+            **{lane["id"]: f"SHIPBRAID_ACCEPTANCE_{index}" for index, lane in enumerate(lanes)},
         }
         tokens = {name: secrets.token_urlsafe(48) for name in env_names}
         env = {

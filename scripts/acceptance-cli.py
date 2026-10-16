@@ -13,7 +13,7 @@ import time
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--binary", default="target/debug/auto-deliver")
+    parser.add_argument("--binary", default="target/debug/shipbraid")
     parser.add_argument("--output", type=Path)
     args = parser.parse_args()
     binary = str(Path(args.binary).resolve())
@@ -66,8 +66,8 @@ def main():
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
-    env = {key: value for key, value in os.environ.items() if not key.startswith("AUTO_DELIVER_")}
-    env.update(AUTO_DELIVER_TOKEN=secret, AUTO_DELIVER_URL=f"http://127.0.0.1:{server.server_port}")
+    env = {key: value for key, value in os.environ.items() if not key.startswith("SHIPBRAID_")}
+    env.update(SHIPBRAID_TOKEN=secret, SHIPBRAID_URL=f"http://127.0.0.1:{server.server_port}")
     report = {"executor": "http-fixture", "real_deployments": 0, "checks": []}
 
     def mode(value):
@@ -120,7 +120,7 @@ def main():
         value = run("--url", f"https://user:{secret}@example.invalid", "system")
         assert value["error"]["code"] == "local_error"
         local_env = env.copy()
-        local_env.pop("AUTO_DELIVER_TOKEN")
+        local_env.pop("SHIPBRAID_TOKEN")
         result = subprocess.run([binary, "--json", "--token-file", "/nonexistent/private-credential-path", "system"], env=local_env, text=True, capture_output=True, timeout=5)
         assert result.returncode == 1 and "private-credential-path" not in result.stdout
         assert json.loads(result.stdout)["error"]["code"] == "local_error"

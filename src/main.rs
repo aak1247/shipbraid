@@ -18,21 +18,16 @@ struct Cli {
     #[arg(
         long,
         global = true,
-        env = "AUTO_DELIVER_URL",
+        env = "SHIPBRAID_URL",
         default_value = "http://127.0.0.1:8787"
     )]
     url: String,
-    #[arg(
-        long,
-        global = true,
-        env = "AUTO_DELIVER_TOKEN",
-        hide_env_values = true
-    )]
+    #[arg(long, global = true, env = "SHIPBRAID_TOKEN", hide_env_values = true)]
     token: Option<String>,
     #[arg(
         long,
         global = true,
-        env = "AUTO_DELIVER_TOKEN_FILE",
+        env = "SHIPBRAID_TOKEN_FILE",
         conflicts_with = "token"
     )]
     token_file: Option<PathBuf>,
@@ -299,7 +294,7 @@ impl Api {
             let token = self
                 .token
                 .as_deref()
-                .context("set AUTO_DELIVER_TOKEN or --token")?;
+                .context("set SHIPBRAID_TOKEN or --token")?;
             request = request.bearer_auth(token);
         }
         if let Some(body) = body {
@@ -444,7 +439,7 @@ async fn main() -> std::process::ExitCode {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "auto_deliver=info".into()),
+                .unwrap_or_else(|_| "shipbraid=info".into()),
         )
         .with_writer(std::io::stderr)
         .init();
@@ -487,7 +482,7 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     if let Command::Serve { config } = &cli.command {
-        auto_deliver::service::serve(auto_deliver::config::Config::load(config)?).await?;
+        shipbraid::service::serve(shipbraid::config::Config::load(config)?).await?;
         return Ok(0);
     }
     let token = match cli.token_file {
@@ -792,7 +787,7 @@ mod tests {
     #[test]
     fn submit_requires_one_unambiguous_environment_selector() {
         let base = [
-            "auto-deliver",
+            "shipbraid",
             "submit",
             "--revision",
             "0123456789012345678901234567890123456789",
@@ -832,7 +827,7 @@ mod tests {
     #[test]
     fn cli_accepts_agent_context_and_bounded_query_flags() {
         let cli = Cli::try_parse_from([
-            "auto-deliver",
+            "shipbraid",
             "--json",
             "submit",
             "--lane",
@@ -852,7 +847,7 @@ mod tests {
         assert!(cli.json);
         assert!(
             Cli::try_parse_from([
-                "auto-deliver",
+                "shipbraid",
                 "list",
                 "request",
                 "--task-id",
@@ -862,10 +857,8 @@ mod tests {
             ])
             .is_ok()
         );
-        assert!(
-            Cli::try_parse_from(["auto-deliver", "list", "request", "--limit", "201"]).is_err()
-        );
-        assert!(Cli::try_parse_from(["auto-deliver", "system"]).is_ok());
+        assert!(Cli::try_parse_from(["shipbraid", "list", "request", "--limit", "201"]).is_err());
+        assert!(Cli::try_parse_from(["shipbraid", "system"]).is_ok());
     }
     #[test]
     fn api_rejects_urls_with_embedded_credentials() {

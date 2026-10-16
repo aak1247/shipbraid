@@ -1,15 +1,15 @@
-use auto_deliver::{
+use chrono::Utc;
+use shipbraid::{
     domain::{Event, Lane, State},
     engine::Engine,
     store::Store,
 };
-use chrono::Utc;
 use std::collections::BTreeSet;
 use uuid::Uuid;
 
 fn lane() -> Lane {
     Lane {
-        tenant_id: auto_deliver::domain::default_local_tenant(),
+        tenant_id: shipbraid::domain::default_local_tenant(),
         id: "test".into(),
         project: "fixture".into(),
         environment: "test".into(),

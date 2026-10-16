@@ -1,6 +1,6 @@
 # Agent 发布管理
 
-Shipbraid 接受同一团队内多个 Agent 通过 HTTP 或 CLI 协作。当前租户由服务端固定为 `local`，不接受客户端指定。项目名是 Shipbraid，当前二进制与环境变量仍叫 `auto-deliver`。
+Shipbraid 接受同一团队内多个 Agent 通过 HTTP 或 CLI 协作。当前租户由服务端固定为 `local`，不接受客户端指定。项目与二进制统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀。已有安装升级见[改名说明](naming.md)。
 
 ## 配置身份
 
@@ -21,10 +21,10 @@ lanes = ["demo-test"]
 服务启动前在私有环境中设置这些变量；不要将值写入配置或仓库。每个 Agent 用自己的 token 文件访问：
 
 ```bash
-export AUTO_DELIVER_TOKEN_FILE="$HOME/.config/auto-deliver/agent-a.token"
-# 若此前设置过 AUTO_DELIVER_TOKEN，应先 unset，避免两种凭据来源冲突。
-auto-deliver --json system
-auto-deliver --json list lane
+export SHIPBRAID_TOKEN_FILE="$HOME/.config/shipbraid/agent-a.token"
+# 若此前设置过 SHIPBRAID_TOKEN，应先 unset，避免两种凭据来源冲突。
+shipbraid --json system
+shipbraid --json list lane
 ```
 
 `system` 返回 API 版本、`tenant_id`、认证主体与主体能力。通道列出允许的组件、覆盖模式、是否启用、执行器类型和抢占能力；不会暴露镜像路径或凭据。`urgent` 与 `admin` 独立配置，普通 Agent 不需要管理员权限。
@@ -33,14 +33,14 @@ auto-deliver --json list lane
 
 ```bash
 REVISION=$(git rev-parse HEAD)
-auto-deliver --json submit \
+shipbraid --json submit \
   --project demo --environment test \
   --revision "$REVISION" --components app \
   --task-id issue-42 --session-id session-a1 \
   --collaborator agent-b
 
 # 将 REQUEST_ID 替换为提交结果的 id。
-auto-deliver --json wait REQUEST_ID --timeout-seconds 60
+shipbraid --json wait REQUEST_ID --timeout-seconds 60
 ```
 
 版本必须已存在于管理员配置的受信镜像并满足发布线规则，CLI 不会根据客户端地址自行拉取仓库。默认 exact；descendant 需要通道显式启用，且 Git 祖先关系不证明功能没有被 revert。
@@ -60,9 +60,9 @@ auto-deliver --json wait REQUEST_ID --timeout-seconds 60
 新 Agent 或丢失本地会话时，先按任务找回：
 
 ```bash
-auto-deliver --json list request --task-id issue-42 --limit 20
-auto-deliver --json inspect request REQUEST_ID
-auto-deliver --json wait REQUEST_ID --timeout-seconds 60
+shipbraid --json list request --task-id issue-42 --limit 20
+shipbraid --json inspect request REQUEST_ID
+shipbraid --json wait REQUEST_ID --timeout-seconds 60
 ```
 
 不同 principal 的同键提交仍是独立请求。后继 Agent 若只接手跟踪，应查询并等待原请求；需要自己独立的上线需求时再提交。兼容请求会共享执行，但不会合并身份、截止时间与最终结果。
@@ -74,9 +74,9 @@ auto-deliver --json wait REQUEST_ID --timeout-seconds 60
 同一通道的授权 Agent 可以查看请求。撤回、重试和修改优先级要求通道权限，并且是请求本人、冻结的协作者或管理员。提交/提升 urgent，以及 retry 已有 urgent 请求，都另需 urgent 或 admin；撤回 urgent 不需要该额外能力。
 
 ```bash
-auto-deliver --json withdraw REQUEST_ID
-auto-deliver --json retry REQUEST_ID
-auto-deliver --json priority REQUEST_ID urgent --reason "incident fix"
+shipbraid --json withdraw REQUEST_ID
+shipbraid --json retry REQUEST_ID
+shipbraid --json priority REQUEST_ID urgent --reason "incident fix"
 ```
 
 先读取 `allowed_actions`（`withdraw`、`retry`、`raise_priority`），结合 `waiting_reason`、`blocked_reason`、receipt 判断下一步。提示只是响应时快照，实际执行会重新检查权限与状态。`retry` 保留原目标和截止时间，不能用它跳过 unknown 所有权核对；旧执行的停止未经证明时继续等待或由管理员调查。
