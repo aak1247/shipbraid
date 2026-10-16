@@ -23,6 +23,7 @@ def main():
     parser.add_argument('--listen', default='127.0.0.1:8787')
     parser.add_argument('--autotask-repository', type=Path, default=Path('/home/yahui/repos/autotask'))
     parser.add_argument('--autotask-checkout', type=Path, default=Path('/home/yahui/repos/autotask-head'))
+    parser.add_argument('--autotask-script-ref', default='origin/vibe', help='Published trusted commit/ref containing the reviewed deployment script')
     args = parser.parse_args()
     endpoint = urllib.parse.urlsplit('http://' + args.listen)
     try:
@@ -45,7 +46,7 @@ def main():
     if active:
         raise SystemExit('Existing service is active. Drain, settle active tasks and stop it before this installer upgrades the immutable release/config')
     revision = subprocess.check_output(['git', '-C', str(root), 'rev-parse', 'HEAD'], text=True).strip()
-    deploy_source_commit = subprocess.check_output(['git', '-C', str(args.autotask_repository), 'rev-parse', 'HEAD'], text=True).strip()
+    deploy_source_commit = subprocess.check_output(['git', '-C', str(args.autotask_repository), 'rev-parse', '--verify', '--end-of-options', args.autotask_script_ref + '^{commit}'], text=True).strip()
     deploy_source = subprocess.check_output(['git', '-C', str(args.autotask_repository), 'show', deploy_source_commit + ':scripts/deploy-local.sh'])
     stamp = hashlib.sha256(deploy_source + binary.read_bytes() + (root / 'integration/autotask/bridge.py').read_bytes() + (dist / 'index.html').read_bytes()).hexdigest()[:12]
     release = data / 'releases' / (revision[:12] + '-' + stamp)
