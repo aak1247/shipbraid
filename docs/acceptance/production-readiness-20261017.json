@@ -1,0 +1,95 @@
+{
+  "observed_at": "2026-10-16T16:21:19.012453+00:00",
+  "scope": "Read-only readiness audit before enabling production coordination",
+  "decision": "BLOCKED_DO_NOT_ENABLE_PRODUCTION",
+  "production_mutations": 0,
+  "coordinator": {
+    "version": "0.2.0",
+    "ready": true,
+    "production_lane_enabled": false,
+    "last_checked_source_ci": "https://github.com/aak1247/auto-deliver/actions/runs/38903061742",
+    "ci_conclusion": "success"
+  },
+  "development": {
+    "service_health_ready": true,
+    "last_successful_coordinated_run": "b2924ad8-1949-45ab-b712-21dbd07628bc",
+    "blocked_run": "34acc90e-187f-49ce-88a7-c78b78ba280c",
+    "request_id": "329e01c9-31ba-44a2-8786-00c4a4d74538",
+    "revision": "0d78bc0a24ca69b53ea95ef7d7d8cf309817e956",
+    "request_status": "waiting",
+    "run_state": "unknown",
+    "job_result": {
+      "returncode": 101,
+      "failed_stage": "worker Rust library build",
+      "compiler_signal": "SIGTERM (15)",
+      "termination_initiator": "not established",
+      "systemd_unit_active_state": "failed",
+      "systemd_unit_sub_state": "failed",
+      "main_pid": 0,
+      "control_group": ""
+    }
+  },
+  "blockers": [
+    {
+      "id": "FAILED_HOOK_RECOVERY",
+      "severity": "P1",
+      "finding": "Opaque hook failures retain ownership when environment changes are not proven. Current hooks protocol has no stopped result and resolve_unknown_hook unconditionally rejects ConfirmStopped, leaving this failed job without a proven-stop recovery path.",
+      "evidence": [
+        "src/service.rs:resolve_unknown_hook",
+        "src/hooks.rs:HookStatus",
+        "integration/autotask/bridge.py:hook"
+      ],
+      "required_before_enable": "Implement independently verified stopped-job/environment reconciliation to a failed or needs-attention outcome, explicit retry, and subprocess crash/restart acceptance. Do not clear the database or fabricate a successful receipt."
+    },
+    {
+      "id": "REPEATED_TERMINAL_FAILURE_EVENTS",
+      "severity": "P1",
+      "finding": "Each observation of the same failed hook repeats both the unknown transition and identical error log.",
+      "sample": {
+        "total_events": 27412,
+        "run_unknown_events": 12986,
+        "identical_failure_logs": 12986,
+        "first_failure_log_utc": "2026-10-16T12:30:25.731163387Z",
+        "last_failure_log_utc": "2026-10-16T16:20:25.094931891Z"
+      },
+      "evidence": [
+        "src/service.rs:apply_hook_reply status/message handling",
+        "src/engine.rs:mark_unknown_inner"
+      ],
+      "required_before_enable": "Persist state changes and new executor log records, deduplicate unchanged observation results, and verify bounded growth during a persistent failure."
+    }
+  ],
+  "production_target_read_only": {
+    "existing_entry": "AutoTask scripts/release.sh prod",
+    "deployment_plane": "internal Kubernetes",
+    "master": "172.168.1.231",
+    "context": "kubernetes-admin@kubernetes",
+    "namespace": "prod",
+    "deployment": "autotask",
+    "desired_replicas": 2,
+    "ready_replicas": 2,
+    "image": "harbor.hive-intel.com/prod/autotask@sha256:1765e198801af87db62b3c30149fed64e664289b938cf736176469a7b41841b0",
+    "app_container_restarts": [
+      0,
+      0
+    ],
+    "image_pull_secret_name": "harbor"
+  },
+  "remaining_production_integration": {
+    "adapter_currently_restricted_to_dev": true,
+    "existing_prod_release_also_manages": [
+      "node166 standalone worker unless skipped",
+      "website workload unless skipped"
+    ],
+    "needed": "Create a separate production adapter/configuration with frozen immutable source/image, explicit component and backup scope, rollout/digest/readiness verification, existing rollback/source snapshot protections, and separately scoped credentials."
+  },
+  "other_open_acceptance": {
+    "id": "NFR-001",
+    "target": "50 requests/s for 60 seconds, p95 < 250ms",
+    "last_measured_source": "14fe6af",
+    "last_measured_p95_ms": 14265.768,
+    "result": "NOT PASSED",
+    "later_optimizations_retested": false
+  },
+  "safety": "No deploy, cancellation, forced unlock, database mutation, credential change, or production lane activation performed."
+}
