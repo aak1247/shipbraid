@@ -5,21 +5,21 @@
 - Feature name：M1 发布请求协调与安全抢占内核。
 - Linked design doc：[design.md](design.md)。
 - Linked review report：[设计 §13](design.md#13-review-feedback-tracking)。
-- Plan owner：项目所有者；实现负责人待指定。
-- Contributors：当前设计由 Codex 编写并按清单自审，没有启动实现子任务。
+- Plan owner：项目所有者；Codex 集成负责人。
+- Contributors：Codex 主代理负责集成与 CLI；gpt-6-luna/max 三个子代理分别负责领域内核、持久化/API/执行器、Dashboard。
 - Last updated：2026-10-16。
-- Plan status：DRAFT（本轮交付设计，尚未开始实现）。
+- Plan status：ACTIVE（用户已明确授权实施；含 Dashboard 增量评审 PASS）。
 - Review gate status：PASS，仅针对 M1；不是生产接入批准。
 
 ## 2. Scope Lock
 
-允许范围：本仓库 Cargo 工程、src、migrations、tests、配置样例、文档及本项目自身质量检查。一个 package、一个服务、SQLite、HTTP/CLI、受控本地 Git 关系证明和 ScriptedExecutor。
+允许范围：本仓库 Cargo 工程、src、migrations、tests、配置样例、文档及本项目自身质量检查。一个 package、一个服务、SQLite、HTTP/CLI、受控本地 Git 关系证明、ScriptedExecutor 和 React/TypeScript/Tailwind 只读 Dashboard。
 
-排除范围：AutoTask 代码/数据库、真实 GitHub Actions 调度、真实生产部署、集群/SSH/Harbor 凭据配置、Web UI、多实例 HA、通用 DAG、自动 rollback 和多个执行器同时接入。
+排除范围：AutoTask 代码/数据库、真实 GitHub Actions 调度、真实生产部署、集群/SSH/Harbor 凭据配置、多实例 HA、通用 DAG、自动 rollback 和多个执行器同时接入。
 
 范围变更规则：改变 coverage、lane 原子边界、状态终态、停止证明、权限或失败重试策略，先同步设计和场景矩阵并重新过评审；不在实现中默默增加“更智能”的默认行为。
 
-评审通过是进入实现的技术前提。M1 是否启动由后续实施指令决定，本计划保持 DRAFT；不把设计文件交付标记成运行时功能完成。
+评审通过是进入实现的技术前提。用户于 2026-10-16 明确启动实施；以运行证据更新状态。新增范围见 design.md §15 与 implementation-contract.md。
 
 ## 3. Task Breakdown
 
@@ -156,6 +156,18 @@
   - [ ] 达到 NFR-001 的测量目标，或经评审修改目标并明确原因；不得冒充已达标。
   - [ ] README 明确 M1 已实现的能力、单实例限制及 M2 尚未接通的边界。
 
+### Task T-009 — 只读 Dashboard
+
+- Status：IN_PROGRESS；Owner：dashboard（gpt-6-luna/max）；Priority：P1。
+- Linked requirements：FR-010、FR-013、NFR-003。
+- Objective：直接查看真实服务中的任务状态、替代关系和日志。
+- Allowed modification range：web/、PRODUCT.md、DESIGN.md、.impeccable/ 前端设计记录。
+- Dependencies：T-007 契约；可并行开发。
+- Completion conditions：
+  - [ ] React + TS + Tailwind typecheck/build 通过。
+  - [ ] 有鉴权真实 API；lane/request/run 列表详情、阶段时间线、游标日志、空态和错误态可用。
+  - [ ] 内存令牌、可见页轮询、桌面和移动端浏览器验收。
+
 ## 4. TODO Board
 
 ### TODO
@@ -171,7 +183,7 @@
 
 ### IN_PROGRESS
 
-无。当前未开始实现。
+T-001～T-009 已分配并开始实施。各任务完成条件仍待运行验证。
 
 ### BLOCKED
 
@@ -179,7 +191,7 @@
 
 ### DONE
 
-设计交付已完成，证据为 design.md 和本计划；以上八项实施任务均未完成，不因文档存在而勾选。
+设计交付已完成，证据为 design.md 和本计划；以上九项实施任务均未完成，不因文档存在而勾选。
 
 ## 5. Milestones
 
@@ -205,7 +217,7 @@ M2 退出条件：用户的核心场景在真实测试工作流中成立；M1 �
 
 ## 6. Feature-Level Completion Conditions
 
-- [ ] T-001～T-008 全部 DONE，每项有提交/测试/验收证据。
+- [ ] T-001～T-009 全部 DONE，每项有提交/测试/验收证据。
 - [ ] 核心两条规则及完整异常场景满足设计 §10。
 - [ ] 不存在未解决 P0/P1 实施阻塞；scope lock 没有被暗中扩张。
 - [ ] 技术评审仍为 PASS；实际交付状态与文档一致。
@@ -216,4 +228,4 @@ M2 退出条件：用户的核心场景在真实测试工作流中成立；M1 �
 
 状态只使用 TODO、IN_PROGRESS、BLOCKED、DONE；实施开始后及时更新 owner、依赖、证据与完成条件，TODO Board 同步修改。
 
-增加任务时写明来源需求和范围影响；遇到越界先修订设计，不以“顺手”增加真实生产执行、额外数据库或 Web UI。只有全部必要任务验收后才把计划改为 DONE。M2 必须有单独计划，不能在 M1 收尾时悄悄接入。
+增加任务时写明来源需求和范围影响；遇到越界先修订设计，不以“顺手”增加真实生产执行、额外数据库或危险 Web 运维操作。只有全部必要任务验收后才把计划改为 DONE。M2 必须有单独计划，不能在 M1 收尾时悄悄接入。

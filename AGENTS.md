@@ -3,7 +3,7 @@
 ## 项目边界
 
 - 独立 Rust 项目；不依赖 AutoTask 的数据库、运行时、内部服务或业务实体。
-- 当前为设计阶段。README 中的 API、CLI 和 Rust 模块均不是已实现能力。
+- 当前进入 M1 实现阶段；只有通过验证的能力才能标为已实现。M1 使用模拟执行器，不连接真实部署。
 - 领域和范围以 docs/design.md、docs/execution-plan.md 为准。
 - 默认使用一个 Cargo package 按模块组织；没有证据前不拆微服务或多 crate。
 

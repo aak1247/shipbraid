@@ -8,3 +8,8 @@
 *.db-wal
 *.db-shm
 *.log
+
+/web/node_modules/
+/web/dist/
+/.impeccable/review/
+/.impeccable/context*

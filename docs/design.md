@@ -3,7 +3,7 @@
 ## 1. Document Control
 
 - Feature name：发布请求协调与安全抢占。
-- Version：0.1，2026-10-16。
+- Version：0.2，2026-10-16。
 - Author：Codex；产品方向来自项目所有者。
 - Reviewers：Codex 按 design-review-gate 清单自审；不是独立评审或用户确认记录。
 - Status：APPROVED（技术自审范围为下述 M1；M2 为后续边界）。
@@ -25,7 +25,7 @@
 
 **Goals**：持久保存每个发布请求；复用覆盖执行；合并兼容的待处理请求；支持紧急优先与安全抢占；共享已验收的结果；在重复投递、服务重启和取消不明时保留正确归属。
 
-**Non-goals**：自研编译器、通用 DAG 平台、代码合并服务、语义代码分析、Web 控制台、自动数据库回滚、多租户 SaaS、跨机房调度或“任意脚本可随时强杀”。
+**Non-goals**：自研编译器、通用 DAG 平台、代码合并服务、语义代码分析、自动数据库回滚、多租户 SaaS、跨机房调度或“任意脚本可随时强杀”。
 
 不承诺替代后的每个旧 CI run 都显示绿色；请求层显示成功及 satisfied_by_run，执行器原始取消记录仍保留。
 
@@ -33,7 +33,7 @@
 
 | 阶段 | 包含 | 不包含 |
 | --- | --- | --- |
-| M1：调度内核 | Rust 单服务；SQLite；API/CLI；完整覆盖/合并/抢占/恢复；ScriptedExecutor 可控执行器与故障注入 | 真实构建、生产写入、GitHub 凭据接入、任意命令执行 |
+| M1：调度内核 | Rust 单服务；SQLite；API/CLI；React + TypeScript + Tailwind 只读 Dashboard；完整覆盖/合并/抢占/恢复；ScriptedExecutor 可控执行器与故障注入 | 真实构建、生产写入、GitHub 凭据接入、任意命令执行 |
 | M2：首个真实接入 | GitHub Actions 关联、查询、取消、阶段准入和独立环境验收；先测试环境 | 多执行器矩阵、自动生产授权、Argo CD/Dagger 同时接入 |
 
 M1 必须完整验收用户的两条核心规则，但只对可控执行器声明通过。可运行的真实发布闭环要到 M2 才成立。
@@ -63,6 +63,7 @@ M1 必须完整验收用户的两条核心规则，但只对可控执行器声�
 - **FR-009 持久恢复**：重启、命令重复、回执重复/乱序、取消与完成竞争，不能重复上线或丢请求。
 - **FR-010 查询与审计**：API/CLI 可查看请求、执行、决策理由和顺序事件；等待端断开不取消发布。
 - **FR-011 执行器契约**：显式声明阶段、可停止能力、稳定身份、观察和验收能力；unknown 不自动重放。
+- **FR-013 Dashboard**：React + TypeScript + Tailwind 操作台通过相同鉴权 API 查看通道、请求、执行、替代关系、审计时间线与有界日志；明确模拟执行器，处理空态、加载、断线、移动布局；令牌仅驻留内存。M1 不提供浏览器内危险运维操作。
 - **FR-012 接入与权限**：主体按项目授权；urgent/admin 分权；所有环境写入必须走配置的执行器阶段准入。
 
 ### 6.2 Non-Functional Requirements
@@ -401,3 +402,7 @@ PASS（MEDIUM）。同一代理自审，结论仅表示 M1 技术设计满足当
 - [x] 开放问题已指定 owner、时间和安全默认。
 
 参考依据：本设计的业务策略是本项目决策；第三方文档仅支持框架/外部接口事实。[Axum](https://docs.rs/axum/latest/axum/)、[SQLx](https://docs.rs/sqlx/latest/sqlx/)、[GitHub concurrency](https://docs.github.com/en/actions/concepts/workflows-and-actions/concurrency)、[Temporal 消息模型](https://docs.temporal.io/encyclopedia/workflow-message-passing)。
+
+## 15. 2026-10-16 实施增量评审
+
+用户明确要求开始实现，并新增 React/TypeScript/Tailwind Dashboard。范围按 [实施契约](implementation-contract.md) 锁定。技术自审结论 PASS：保留单服务/SQLite，不加入账号系统、WebSocket 服务或编译引擎；Dashboard 仅消费有鉴权的列表、详情、游标日志接口。M1 仍限定 ScriptedExecutor，真实 GitHub Actions 为 M2。新增前端工作可独立并行；领域状态和前后端字段先固定契约。不是独立评审或生产接入授权。
