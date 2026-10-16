@@ -1,0 +1,29 @@
+{
+  "observed_at": "2026-10-16T12:27:15.343310+00:00",
+  "url": "http://172.168.3.70:8787",
+  "listener": "172.168.3.70:8787",
+  "upstream": "127.0.0.1:8787",
+  "transport": "systemd-socket-proxyd",
+  "socket_enabled": "enabled",
+  "cross_host_ready_probe": {
+    "client": "172.168.3.63",
+    "status": "ready"
+  },
+  "dashboard_http_status": 200,
+  "unauthenticated_api_status": 401,
+  "authenticated_api_status": 200,
+  "system": {
+    "executor": "hooks",
+    "draining": false,
+    "version": "0.2.0"
+  },
+  "browser_title": "Auto-deliver \u00b7 \u53d1\u5e03\u534f\u8c03\u53f0",
+  "coordinator_pid_before": 1995293,
+  "coordinator_pid_after": 1995293,
+  "coordinator_restarted": false,
+  "socket_active": true,
+  "proxy_active": true,
+  "socket_restart_verified": true,
+  "unit_syntax_verified": true,
+  "free_bind_before_interface_ready": true
+}
