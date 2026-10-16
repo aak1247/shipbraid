@@ -73,6 +73,8 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .topbar-right { gap: 15px; color: var(--muted); font-size: 12px; }
 .executor-badge { gap: 7px; padding: 5px 8px; color: #3d554a; background: #edf3ef; border: 1px solid #d5e2da; border-radius: 5px; font-family: var(--mono); font-size: 12px; letter-spacing: -.02em; }
 .executor-dot { width: 6px; height: 6px; background: #57916f; border-radius: 50%; }
+.executor-badge.is-scripted { color: #775011; background: #fbf1dc; border-color: #ecddb9; }
+.executor-badge.is-scripted .executor-dot { background: #b47a1a; }
 .connection-label { gap: 6px; color: var(--success); white-space: nowrap; }
 .connection-dot { width: 6px; height: 6px; background: var(--success); border-radius: 50%; box-shadow: 0 0 0 3px var(--success-soft); }
 .connection-stale { color: var(--attention); }
@@ -90,9 +92,16 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .rail-heading p { margin: 0; color: #78847e; font: 12px var(--mono); letter-spacing: .13em; }
 .rail-heading p span { margin-left: 4px; color: #59665f; font-variant-numeric: tabular-nums; }
 .rail-rule { display: block; width: 29px; height: 2px; margin: 0 0 3px; background: var(--accent); }
+.lane-filters { display: grid; gap: 7px; margin: 0 2px 12px; }
+.lane-filter { display: grid; gap: 4px; min-width: 0; color: #748079; font-size: 10px; }
+.lane-filter select { width: 100%; min-width: 0; height: 29px; padding: 0 7px; color: #44534a; background: var(--raised); border: 1px solid #d6ded9; border-radius: 4px; font-size: 11px; }
+.lane-filter select:focus-visible { border-color: #77a18d; }
 .lane-list { display: flex; flex-direction: column; gap: 4px; }
 .lane-item { position: relative; display: block; width: 100%; padding: 11px 10px 9px; text-align: left; background: transparent; border: 1px solid transparent; border-radius: 6px; cursor: pointer; transition: background-color .16s ease, border-color .16s ease; }
 .lane-item:hover { background: #eff3f0; }
+.lane-item:disabled { opacity: .83; cursor: not-allowed; }
+.lane-item:disabled:hover { background: transparent; }
+.lane-item.is-disabled .lane-project, .lane-item.is-disabled .lane-environment { color: #6c7771; }
 .lane-item.is-current { background: var(--raised); border-color: #cbd9d0; box-shadow: 0 1px 2px rgba(20, 42, 32, .035); }
 .lane-item.is-current::before { position: absolute; top: 8px; bottom: 8px; left: -1px; width: 2px; content: ""; background: var(--accent); }
 .lane-item-top { display: flex; align-items: center; gap: 7px; min-width: 0; }
@@ -101,6 +110,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .lane-project { min-width: 0; overflow: hidden; color: #27342e; font-size: 12px; font-weight: 600; text-overflow: ellipsis; white-space: nowrap; }
 .lane-environment { display: block; margin: 5px 0 0 13px; color: #58665f; font-size: 12px; }
 .lane-id { display: block; margin: 5px 0 0 13px; color: #859089; font: 12px var(--mono); }
+.lane-item-meta { display: flex; align-items: center; justify-content: space-between; gap: 5px; margin: 5px 0 0 13px; }
+.lane-executor { min-width: 0; overflow: hidden; color: #627168; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.lane-disabled { flex: 0 0 auto; padding: 2px 5px; color: #775011; background: #fbf1dc; border: 1px solid #ecddb9; border-radius: 3px; font-size: 9px; }
 .lane-blocked { display: inline-block; margin: 6px 0 0 13px; padding: 2px 5px; color: #80540f; background: #fbf1dc; border-radius: 3px; font-size: 12px; }
 .rail-empty { padding: 11px 8px; color: var(--muted); font-size: 12px; line-height: 1.6; }
 .rail-footnote { display: flex; align-items: flex-start; gap: 8px; margin-top: auto; padding: 12px 6px 0; color: #53675d; border-top: 1px solid var(--line); font-size: 12px; line-height: 1.55; }
@@ -200,6 +212,7 @@ button:focus-visible, input:focus-visible, select:focus-visible {
 .empty-line { display: block; width: 26px; height: 2px; background: var(--accent); }
 .empty-state h2 { margin: 16px 0 5px; color: #293a31; font-size: 14px; font-weight: 600; }
 .empty-state p { max-width: 36ch; margin: 0; color: #627068; font-size: 12px; line-height: 1.65; }
+.disabled-scope-note { margin-top: 10px; color: #775011; font-size: 11px; }
 .text-button { margin-top: 14px; padding: 5px 7px; color: var(--accent); background: transparent; border: 1px solid #c7d8cd; border-radius: 4px; font-size: 12px; cursor: pointer; }
 .ledger-footline { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 11px 2px 0; color: #77837c; font-size: 12px; }
 .ledger-footline > span:first-child { display: flex; align-items: center; gap: 6px; }
@@ -397,10 +410,11 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   .executor-badge { padding: 4px 6px; font-size: 12px; }
   .connection-label { font-size: 12px; }
   .disconnect-button { padding: 5px 7px; font-size: 12px; }
-  .mobile-lane-control { position: relative; display: flex; align-items: center; gap: 9px; min-height: 45px; padding: 0 14px; background: #f9faf8; border-bottom: 1px solid var(--line); }
-  .mobile-lane-control label { flex: 0 0 auto; color: #69776f; font-size: 12px; }
-  .mobile-lane-control select { flex: 1; min-width: 0; height: 32px; appearance: none; padding: 0 26px 0 8px; color: #34483c; background: #fff; border: 1px solid #d4ddd7; border-radius: 4px; font-size: 12px; }
-  .mobile-lane-control svg { position: absolute; right: 22px; pointer-events: none; color: #718078; }
+  .mobile-lane-control { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 7px 9px; padding: 8px 14px 9px; background: #f9faf8; border-bottom: 1px solid var(--line); }
+  .mobile-lane-filters { display: contents; }
+  .mobile-lane-control .lane-filter { gap: 3px; font-size: 10px; }
+  .mobile-lane-picker { display: grid; grid-column: 1 / -1; gap: 3px; min-width: 0; color: #69776f; font-size: 10px; }
+  .mobile-lane-control .lane-filter select, .mobile-lane-picker select { width: 100%; min-width: 0; height: 31px; padding: 0 8px; color: #34483c; background: #fff; border: 1px solid #d4ddd7; border-radius: 4px; font-size: 11px; }
   .console-grid { display: block; min-height: 0; }
   .lane-rail { display: none; }
   .ledger-pane { padding: 20px 13px 14px; }

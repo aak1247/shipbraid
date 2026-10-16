@@ -29,6 +29,16 @@ import type {
 import type { ReactNode } from "react";
 import { transitionLogTarget } from "./logFeed";
 import { requestRelatedToRun, requestRunId } from "./relationships";
+import {
+  isLaneEnabled,
+  laneEnvironments,
+  laneExecutorLabel,
+  laneProjects,
+  lanesInScope,
+  preferredEnabledLane,
+  receiptIsSynthetic,
+  serviceExecutorLabel,
+} from "./laneFilters";
 
 type ViewMode = "requests" | "runs";
 type Selection = { type: "request" | "run"; id: string } | null;
@@ -143,7 +153,7 @@ function ConnectionScreen({
         </form>
         <div className="connect-footnote">
           <span className="signal-mark" aria-hidden="true" />
-          M1 使用 ScriptedExecutor；所有记录均来自当前服务 API。
+          连接后读取当前服务中的通道、执行器与记录；模拟执行数据会明确标注。
         </div>
       </section>
       <footer className="connect-footer">AUTO-DELIVER <span>发布请求协调台</span></footer>
@@ -156,6 +166,45 @@ function Brand() {
     <div className="brand-lockup">
       <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
       <span className="brand-word">auto-deliver</span>
+    </div>
+  );
+}
+
+function LaneFilters({
+  project,
+  environment,
+  projects,
+  environments,
+  idPrefix,
+  onProjectChange,
+  onEnvironmentChange,
+  className,
+}: {
+  project: string;
+  environment: string;
+  projects: string[];
+  environments: string[];
+  idPrefix: string;
+  onProjectChange: (value: string) => void;
+  onEnvironmentChange: (value: string) => void;
+  className: string;
+}) {
+  return (
+    <div className={className}>
+      <label className="lane-filter" htmlFor={`${idPrefix}-project`}>
+        <span>项目</span>
+        <select id={`${idPrefix}-project`} value={project} onChange={(event) => onProjectChange(event.currentTarget.value)}>
+          <option value="">全部项目</option>
+          {projects.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+      </label>
+      <label className="lane-filter" htmlFor={`${idPrefix}-environment`}>
+        <span>环境</span>
+        <select id={`${idPrefix}-environment`} value={environment} onChange={(event) => onEnvironmentChange(event.currentTarget.value)}>
+          <option value="">全部环境</option>
+          {environments.map((item) => <option key={item} value={item}>{item}</option>)}
+        </select>
+      </label>
     </div>
   );
 }
@@ -180,6 +229,8 @@ function App() {
   const [system, setSystem] = useState<SystemInfo | null>(null);
   const [lanes, setLanes] = useState<Lane[]>([]);
   const [laneId, setLaneId] = useState<string | null>(null);
+  const [projectFilter, setProjectFilter] = useState("");
+  const [environmentFilter, setEnvironmentFilter] = useState("");
   const [requests, setRequests] = useState<ReleaseRequest[]>([]);
   const [runs, setRuns] = useState<DeliveryRun[]>([]);
   const [view, setView] = useState<ViewMode>("requests");
@@ -205,12 +256,24 @@ function App() {
   requestsRef.current = requests;
 
   const selection = parseSelection(selectedKey);
-  const activeLane = lanes.find((lane) => lane.id === laneId) ?? null;
+  const visibleLanes = lanesInScope(lanes, { project: projectFilter, environment: environmentFilter });
+  const projectOptions = laneProjects(lanes);
+  const environmentOptions = laneEnvironments(lanes, projectFilter);
+  const activeLane = lanes.find((lane) => lane.id === laneId && isLaneEnabled(lane)) ?? null;
+  const selectedExecutorKind = activeLane?.executor_kind
+    ?? (system?.executor === "scripted" || system?.executor === "hooks" ? system.executor : null);
+  const executorBadgeLabel = activeLane
+    ? laneExecutorLabel(activeLane, system?.executor ?? null)
+    : system?.executor
+      ? serviceExecutorLabel(system.executor)
+      : null;
 
   function clearProtectedData() {
     setSystem(null);
     setLanes([]);
     setLaneId(null);
+    setProjectFilter("");
+    setEnvironmentFilter("");
     setRequests([]);
     setRuns([]);
     setView("requests");
@@ -295,9 +358,19 @@ function App() {
           api.getLanes(signal),
         ]);
         if (!alive || signal.aborted) return;
-        const requestedLane = laneId && nextLanes.some((lane) => lane.id === laneId)
-          ? laneId
-          : nextLanes[0]?.id ?? null;
+        const nextProjectFilter = projectFilter && nextLanes.some((lane) => lane.project === projectFilter)
+          ? projectFilter
+          : "";
+        const nextEnvironmentFilter = environmentFilter && nextLanes.some((lane) =>
+          (!nextProjectFilter || lane.project === nextProjectFilter) && lane.environment === environmentFilter,
+        ) ? environmentFilter : "";
+        if (nextProjectFilter !== projectFilter) setProjectFilter(nextProjectFilter);
+        if (nextEnvironmentFilter !== environmentFilter) setEnvironmentFilter(nextEnvironmentFilter);
+        const lanesInCurrentScope = lanesInScope(nextLanes, {
+          project: nextProjectFilter,
+          environment: nextEnvironmentFilter,
+        });
+        const requestedLane = preferredEnabledLane(lanesInCurrentScope, laneId)?.id ?? null;
         let nextRequests: ReleaseRequest[] = [];
         let nextRuns: DeliveryRun[] = [];
         if (requestedLane) {
@@ -349,7 +422,7 @@ function App() {
       controller?.abort();
       document.removeEventListener("visibilitychange", onVisibilityChange);
     };
-  }, [laneId, refreshKey, token]);
+  }, [environmentFilter, laneId, projectFilter, refreshKey, token]);
 
   useEffect(() => {
     if (!token || !laneId || !selection) {
@@ -493,13 +566,45 @@ function App() {
     };
   }, [laneId, selectedKey, token]);
 
-  function chooseLane(nextLane: string) {
+  function activateLane(nextLane: string | null) {
     if (nextLane === laneId) return;
     setLaneId(nextLane);
+    setRequests([]);
+    setRuns([]);
     setSelectedKey(null);
     setStatusFilter("all");
     setPriorityFilter("all");
     setSearch("");
+    setRequestDetail(null);
+    setRunDetail(null);
+    setLinkedRun(null);
+    setEvents([]);
+    setLogs([]);
+    setLogCursor(0);
+    setError(null);
+    setLastUpdated(null);
+    setDetailError(null);
+    setDetailUpdated(null);
+    setLoading(true);
+  }
+
+  function chooseLane(nextLane: string) {
+    const candidate = visibleLanes.find((lane) => lane.id === nextLane);
+    if (!candidate || !isLaneEnabled(candidate)) return;
+    activateLane(candidate.id);
+  }
+
+  function chooseProjectFilter(nextProject: string) {
+    setProjectFilter(nextProject);
+    setEnvironmentFilter("");
+    const scoped = lanesInScope(lanes, { project: nextProject, environment: "" });
+    activateLane(preferredEnabledLane(scoped, laneId)?.id ?? null);
+  }
+
+  function chooseEnvironmentFilter(nextEnvironment: string) {
+    setEnvironmentFilter(nextEnvironment);
+    const scoped = lanesInScope(lanes, { project: projectFilter, environment: nextEnvironment });
+    activateLane(preferredEnabledLane(scoped, laneId)?.id ?? null);
   }
 
   function chooseView(nextView: ViewMode) {
@@ -542,8 +647,10 @@ function App() {
       <header className="topbar">
         <div className="topbar-brand"><Brand /><span className="topbar-divider" /><span className="topbar-context">发布协调台</span></div>
         <div className="topbar-right">
-          {system?.executor && (
-            <span className="executor-badge"><span className="executor-dot" />{system.executor === "scripted" ? <>模拟执行<span className="executor-name"> · ScriptedExecutor</span></> : system.executor}</span>
+          {executorBadgeLabel && (
+            <span className={`executor-badge ${selectedExecutorKind === "scripted" ? "is-scripted" : ""}`}>
+              <span className="executor-dot" />{executorBadgeLabel}
+            </span>
           )}
           <span className={`connection-label ${error ? "connection-stale" : ""}`}>
             <span className="connection-dot" />
@@ -563,39 +670,75 @@ function App() {
       </header>
 
       <div className="mobile-lane-control">
-        <label htmlFor="mobile-lane">发布通道</label>
-        <select id="mobile-lane" value={laneId ?? ""} onChange={(event) => chooseLane(event.currentTarget.value)}>
-          {lanes.length === 0 && <option value="">暂无通道</option>}
-          {lanes.map((lane) => <option key={lane.id} value={lane.id}>{lane.project} / {lane.environment}</option>)}
-        </select>
-        <Icon name="chevron" />
+        <LaneFilters
+          className="mobile-lane-filters"
+          idPrefix="mobile-lane"
+          project={projectFilter}
+          environment={environmentFilter}
+          projects={projectOptions}
+          environments={environmentOptions}
+          onProjectChange={chooseProjectFilter}
+          onEnvironmentChange={chooseEnvironmentFilter}
+        />
+        <label className="mobile-lane-picker" htmlFor="mobile-lane-select">
+          <span>发布通道</span>
+          <select id="mobile-lane-select" value={laneId ?? ""} onChange={(event) => chooseLane(event.currentTarget.value)}>
+            <option value="">{visibleLanes.some(isLaneEnabled)
+              ? "选择通道"
+              : visibleLanes.length
+                ? "无已启用通道"
+                : lanes.length === 0
+                  ? "暂无通道"
+                  : "无匹配通道"}</option>
+            {visibleLanes.map((lane) => <option key={lane.id} value={lane.id} disabled={!isLaneEnabled(lane)}>
+              {lane.project} / {lane.environment}{!isLaneEnabled(lane) ? "（已禁用）" : ""}
+            </option>)}
+          </select>
+        </label>
       </div>
 
       <div className="console-grid">
         <aside className="lane-rail" aria-label="发布通道">
           <div className="rail-heading">
-            <div><h2>发布通道</h2><p>LANES <span>{lanes.length}</span></p></div>
+            <div><h2>发布通道</h2><p>LANES <span>{visibleLanes.length}{visibleLanes.length !== lanes.length ? ` / ${lanes.length}` : ""}</span></p></div>
             <span className="rail-rule" />
           </div>
+          <LaneFilters
+            className="lane-filters"
+            idPrefix="rail-lane"
+            project={projectFilter}
+            environment={environmentFilter}
+            projects={projectOptions}
+            environments={environmentOptions}
+            onProjectChange={chooseProjectFilter}
+            onEnvironmentChange={chooseEnvironmentFilter}
+          />
           {loading && lanes.length === 0 ? (
             <div className="lane-loading" aria-label="正在读取发布通道"><span /><span /><span /></div>
           ) : lanes.length === 0 ? (
             <div className="rail-empty">服务尚未配置通道。</div>
+          ) : visibleLanes.length === 0 ? (
+            <div className="rail-empty">筛选条件下没有发布通道。</div>
           ) : (
             <nav className="lane-list">
-              {lanes.map((lane) => (
+              {visibleLanes.map((lane) => (
                 <button
                   type="button"
-                  className={`lane-item ${lane.id === laneId ? "is-current" : ""}`}
+                  className={`lane-item ${lane.id === laneId ? "is-current" : ""} ${!isLaneEnabled(lane) ? "is-disabled" : ""}`}
                   key={lane.id}
                   onClick={() => chooseLane(lane.id)}
+                  disabled={!isLaneEnabled(lane)}
                   aria-current={lane.id === laneId ? "page" : undefined}
-                  title={`${lane.project} / ${lane.environment} · ${lane.id}`}
+                  title={`${lane.project} / ${lane.environment} · ${lane.id}${!isLaneEnabled(lane) ? " · 已禁用，不可选择" : ""}`}
                 >
                   <span className="lane-item-top"><span className={`lane-state ${lane.active_run_id ? "has-run" : ""}`} />
                     <span className="lane-project">{lane.project}</span></span>
                   <span className="lane-environment">{lane.environment}</span>
                   <span className="lane-id">{shortId(lane.id)}</span>
+                  <span className="lane-item-meta">
+                    <span className="lane-executor">{laneExecutorLabel(lane, system?.executor ?? null)}</span>
+                    {!isLaneEnabled(lane) && <span className="lane-disabled">已禁用</span>}
+                  </span>
                   {lane.blocked_reason && <span className="lane-blocked">需核对</span>}
                 </button>
               ))}
@@ -677,10 +820,27 @@ function App() {
           </div>
 
           <div className="table-wrap">
-            {loading && currentRows.length === 0 ? (
+            {loading && activeLane && currentRows.length === 0 ? (
               <div className="table-loading" role="status" aria-label="正在读取记录"><span /><span /><span /><span /></div>
             ) : !activeLane ? (
-              <div className="empty-state"><span className="empty-line" /><h2>还没有发布通道</h2><p>协调器 API 当前没有返回通道记录。</p></div>
+              <div className="empty-state">
+                <span className="empty-line" />
+                <h2>{lanes.length === 0
+                  ? "还没有发布通道"
+                  : visibleLanes.length === 0
+                    ? "没有匹配的发布通道"
+                    : visibleLanes.some(isLaneEnabled)
+                      ? "请选择可用发布通道"
+                      : "此范围内没有已启用通道"}</h2>
+                <p>{lanes.length === 0
+                  ? "协调器 API 当前没有返回通道记录。"
+                  : visibleLanes.length === 0
+                    ? "调整项目或环境筛选后查看可用通道。"
+                    : visibleLanes.some(isLaneEnabled)
+                      ? "请选择一个已启用的发布通道查看请求与执行记录。"
+                      : "已禁用通道不会读取执行记录；可在通道列表中查看其禁用状态。"}</p>
+                {visibleLanes.length > 0 && !visibleLanes.some(isLaneEnabled) && <span className="disabled-scope-note">此筛选范围内的通道均已禁用。</span>}
+              </div>
             ) : currentRows.length === 0 ? (
               <div className="empty-state">
                 <span className="empty-line" />
@@ -720,6 +880,7 @@ function App() {
           detailLoading={detailLoading}
           detailError={detailError}
           detailUpdated={detailUpdated}
+          executorKind={selectedExecutorKind}
           onSelectRequest={(id) => { setView("requests"); selectRecord("request", id); }}
           onSelectRun={(id) => { setView("runs"); selectRecord("run", id); }}
         />
@@ -791,6 +952,7 @@ function DetailPanel({
   detailLoading,
   detailError,
   detailUpdated,
+  executorKind,
   onSelectRequest,
   onSelectRun,
 }: {
@@ -805,6 +967,7 @@ function DetailPanel({
   detailLoading: boolean;
   detailError: string | null;
   detailUpdated: Date | null;
+  executorKind: Lane["executor_kind"] | null;
   onSelectRequest: (id: string) => void;
   onSelectRun: (id: string) => void;
 }) {
@@ -857,6 +1020,7 @@ function DetailPanel({
             <RequestInspector
               request={currentRequest}
               linkedRun={linkedRun}
+              executorKind={executorKind}
               onSelectRun={onSelectRun}
             />
           )}
@@ -864,6 +1028,7 @@ function DetailPanel({
             <RunInspector
               run={currentRun}
               relatedRequests={relatedRequests}
+              executorKind={executorKind}
               onSelectRequest={onSelectRequest}
               onSelectRun={onSelectRun}
             />
@@ -880,10 +1045,10 @@ function DetailPanel({
           {tab === "timeline" ? (
             <EventTimeline events={events} loading={detailLoading} />
           ) : (
-            <LogFeed logs={logs} cursor={logCursor} runId={currentRun?.id ?? linkedRun?.id ?? null} loading={detailLoading} />
+            <LogFeed logs={logs} cursor={logCursor} runId={currentRun?.id ?? linkedRun?.id ?? null} loading={detailLoading} executorKind={executorKind} />
           )}
           <div className="detail-footline">
-            <span><Icon name="lock" size={13} />日志来自 ScriptedExecutor</span>
+            <span><Icon name="lock" size={13} />日志来源：{executorKind === "scripted" ? "模拟执行器" : executorKind === "hooks" ? "Hooks 执行器" : "当前通道执行器"}</span>
             <span>最多展示最近 {Math.max(logs.length, 100)} 条已读取记录</span>
           </div>
         </>
@@ -892,7 +1057,7 @@ function DetailPanel({
   );
 }
 
-function RequestInspector({ request, linkedRun, onSelectRun }: { request: ReleaseRequest; linkedRun: RunDetail | null; onSelectRun: (id: string) => void }) {
+function RequestInspector({ request, linkedRun, executorKind, onSelectRun }: { request: ReleaseRequest; linkedRun: RunDetail | null; executorKind: Lane["executor_kind"] | null; onSelectRun: (id: string) => void }) {
   const detail = request as RequestDetail;
   const linkedRunId = requestRunId(request);
   return (
@@ -906,7 +1071,7 @@ function RequestInspector({ request, linkedRun, onSelectRun }: { request: Releas
       </div>
       {request.components.length > 0 && <div className="detail-section"><h3>目标组件</h3><ComponentList components={request.components} /></div>}
       {request.reason && <div className="reason-block"><span>请求原因</span><p>{request.reason}</p></div>}
-      {request.status === "satisfied" && detail.receipt && <ReceiptPanel receipt={detail.receipt} />}
+      {request.status === "satisfied" && detail.receipt && <ReceiptPanel receipt={detail.receipt} executorKind={executorKind} />}
       <div className="relation-block">
         <div className="relation-heading"><h3>{request.satisfied_by_run ? "满足此请求的执行" : "当前执行归属"}</h3><span>请求 → 执行</span></div>
         {linkedRunId ? (
@@ -927,7 +1092,7 @@ function RequestInspector({ request, linkedRun, onSelectRun }: { request: Releas
   );
 }
 
-function RunInspector({ run, relatedRequests, onSelectRequest, onSelectRun }: { run: DeliveryRun; relatedRequests: ReleaseRequest[]; onSelectRequest: (id: string) => void; onSelectRun: (id: string) => void }) {
+function RunInspector({ run, relatedRequests, executorKind, onSelectRequest, onSelectRun }: { run: DeliveryRun; relatedRequests: ReleaseRequest[]; executorKind: Lane["executor_kind"] | null; onSelectRequest: (id: string) => void; onSelectRun: (id: string) => void }) {
   const detail = run as RunDetail;
   return (
     <div className="inspector-content">
@@ -943,7 +1108,7 @@ function RunInspector({ run, relatedRequests, onSelectRequest, onSelectRun }: { 
         <DetailField label="最近更新">{formatDate(run.updated_at)}</DetailField>
       </div>
       {run.components.length > 0 && <div className="detail-section"><h3>执行组件</h3><ComponentList components={run.components} /></div>}
-      {detail.receipt && <ReceiptPanel receipt={detail.receipt} />}
+      {detail.receipt && <ReceiptPanel receipt={detail.receipt} executorKind={executorKind} />}
       {run.state === "superseded" && (
         <div className="superseded-callout">
           <strong>执行已被替代</strong>
@@ -979,7 +1144,7 @@ function RunInspector({ run, relatedRequests, onSelectRequest, onSelectRun }: { 
   );
 }
 
-function ReceiptPanel({ receipt }: { receipt: NonNullable<RequestDetail["receipt"]> }) {
+function ReceiptPanel({ receipt, executorKind }: { receipt: NonNullable<RequestDetail["receipt"]>; executorKind: Lane["executor_kind"] | null }) {
   const digests = Object.entries(receipt.component_digests ?? {});
   let report = "";
   try {
@@ -987,7 +1152,7 @@ function ReceiptPanel({ receipt }: { receipt: NonNullable<RequestDetail["receipt
   } catch {
     report = String(receipt.verification_report);
   }
-  const simulated = report.includes("ScriptedExecutor") || report.includes("SYNTHETIC");
+  const simulated = receiptIsSynthetic(receipt, executorKind);
   const resultLabel = (simulated ? "模拟" : "") + (receipt.result === "success" ? "验收通过" : receipt.result === "failure" ? "验收失败" : receipt.result);
   return (
     <section className="receipt-panel" aria-label="部署验收回执">
@@ -1008,7 +1173,7 @@ function ReceiptPanel({ receipt }: { receipt: NonNullable<RequestDetail["receipt
         <dl>{digests.map(([name, value]) => <div key={name}><dt>{name}</dt><dd><code>{typeof value === "string" ? value : JSON.stringify(value)}</code></dd></div>)}</dl>
       </details>}
       {report && <details className="verification-report">
-        <summary>验收报告 <span>ScriptedExecutor 模拟证据</span></summary>
+        <summary>验收报告 <span>{simulated ? "模拟证据" : "服务返回的验收证据"}</span></summary>
         <pre>{report}</pre>
       </details>}
     </section>
@@ -1037,7 +1202,8 @@ function EventTimeline({ events, loading }: { events: AuditEvent[]; loading: boo
   );
 }
 
-function LogFeed({ logs, cursor, runId, loading }: { logs: ExecutorLog[]; cursor: number; runId: string | null; loading: boolean }) {
+function LogFeed({ logs, cursor, runId, loading, executorKind }: { logs: ExecutorLog[]; cursor: number; runId: string | null; loading: boolean; executorKind: Lane["executor_kind"] | null }) {
+  const executorLabel = executorKind === "scripted" ? "模拟执行器" : executorKind === "hooks" ? "Hooks 执行器" : "当前通道执行器";
   return (
     <section className="log-section" aria-label="执行日志">
       <div className="log-meta">
@@ -1047,7 +1213,7 @@ function LogFeed({ logs, cursor, runId, loading }: { logs: ExecutorLog[]; cursor
       {loading && logs.length === 0 ? <div className="feed-loading"><span /><span /><span /></div> : !runId ? (
         <div className="feed-empty"><span className="empty-line" /><p>此请求尚未关联执行。</p><small>执行日志只属于具体 run。</small></div>
       ) : logs.length === 0 ? (
-        <div className="feed-empty"><span className="empty-line" /><p>此执行当前没有已读取日志。</p><small>仅显示 ScriptedExecutor 返回的有限日志。</small></div>
+        <div className="feed-empty"><span className="empty-line" /><p>此执行当前没有已读取日志。</p><small>{executorKind === "scripted" ? "日志由模拟 ScriptedExecutor 提供。" : `${executorLabel}尚未返回日志。`}</small></div>
       ) : (
         <ol className="log-list" aria-label="执行器日志">
           {logs.map((log) => <li key={log.sequence} className={`log-level-${log.level.toLowerCase()}`}>

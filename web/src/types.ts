@@ -18,11 +18,17 @@ export type RunState =
   | "succeeded"
   | "failed";
 export type RunPhase = "preparing" | "building" | "deploying" | "verifying";
+export type ExecutorKind = "scripted" | "hooks";
+export type HookTransport = "command" | "script" | "webhook";
+export type ServiceExecutor = ExecutorKind | "mixed";
 
 export interface Lane {
   id: string;
   project: string;
   environment: string;
+  enabled: boolean;
+  executor_kind: ExecutorKind;
+  hook_transport?: HookTransport | null;
   profile_digest: string;
   active_run_id: string | null;
   generation: number;
@@ -82,7 +88,7 @@ export interface ExecutorLog {
 }
 
 export interface SystemInfo {
-  executor: string;
+  executor: ServiceExecutor;
   draining: boolean;
   version: string;
 }
@@ -97,6 +103,7 @@ export interface ReceiptSummary {
   profile_digest: string;
   verification_report: unknown;
   result: "success" | "failure" | string;
+  synthetic?: boolean;
   [key: string]: unknown;
 }
 

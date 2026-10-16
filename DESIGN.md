@@ -135,7 +135,7 @@ The palette uses cool, low-chroma paper and graphite neutrals with a muted green
 
 ## Layout
 
-Above 1320px, the app uses a narrow lane rail, a flexible ledger, and a record inspector. The table remains the largest area; the inspector is a secondary reading column. Controls sit directly above the ledger, and status or service warnings appear in its flow. The spacing rhythm is based on 8px, with tighter 4px increments for dense labels and chips.
+Above 1320px, the app uses a narrow lane rail, a flexible ledger, and a record inspector. Project and environment filters sit above the lane list; disabled lanes remain visible with a text label. The table remains the largest area; the inspector is a secondary reading column. Controls sit directly above the ledger, and status or service warnings appear in its flow. The spacing rhythm is based on 8px, with tighter 4px increments for dense labels and chips.
 
 At 1320px and below, the inspector moves below the ledger while the lane rail remains visible. At 740px and below, the lane rail becomes a selector and the layout becomes one column. On phones, each semantic table row stacks status, revision, priority, relationship, and time without page-level horizontal scrolling. Filters wrap and remain touch sized.
 
@@ -159,7 +159,7 @@ The form language is softly squared: compact controls use 4–6px corners, panel
 - **Token field and filters:** Raised paper, graphite text, and a fine gray border. Focus adds a green outline; password visibility is a separate, labeled button.
 
 ### Navigation
-- **Lane rail:** Plain text and a small state marker. The selected lane receives a raised surface and a narrow green leading rule.
+- **Lane rail:** Project/environment filters, plain text, a small state marker, and the lane's executor label. The selected lane receives a raised surface and a narrow green leading rule; disabled lanes remain visible but muted with a textual disabled state.
 - **Record and detail controls:** Native button groups distinguish requests from runs and switch between event history and logs. The selected button exposes `aria-pressed`; these controls are not tab widgets.
 
 ### Chips
@@ -173,7 +173,7 @@ The form language is softly squared: compact controls use 4–6px corners, panel
 
 ### Live feeds
 - **Event timeline and executor logs:** Show bounded records with timestamps and sequence numbers. Keep freshness and cursor context visible, and avoid streaming text animation. The ledger states `最近 200 条 · 筛选当前列表`; filters apply to the list currently returned to the page.
-- **Simulation labels:** Keep `模拟执行 · ScriptedExecutor` visible after connection. Label synthetic receipt headings and outcomes as simulated, and keep the report tied to its source run.
+- **Executor labels:** Identify the executor for the selected lane. Label ScriptedExecutor lanes and synthetic receipt headings and outcomes as simulated, and keep each report tied to its source run.
 
 ## Do's and Don'ts
 
