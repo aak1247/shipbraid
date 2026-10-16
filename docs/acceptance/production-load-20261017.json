@@ -1,0 +1,19 @@
+{
+  "executor": "scripted",
+  "rate": 50,
+  "scheduled_seconds": 60,
+  "total_seconds": 192.669,
+  "submitted": 3000,
+  "statuses": {
+    "202": 3000
+  },
+  "p50_ms": 2941.526,
+  "p95_ms": 8809.188,
+  "includes_trusted_git_resolution": true,
+  "nfr_001_pass": false,
+  "source_commit": "7af58fd78af9ea42a6207161576e3073ec672d17",
+  "binary_profile": "release",
+  "real_deployments": 0,
+  "scope": "Isolated scripted executor, fresh synthetic Git mirror and SQLite ledger, never the real coordinator",
+  "note": "Production integration does not close this NFR; all 3000 requests were accepted, but p95 remains above 250ms. No load was sent to real deployment lanes."
+}
