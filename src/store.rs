@@ -1,6 +1,7 @@
-use std::{path::Path, time::Duration};
+use std::{collections::BTreeMap, path::Path, time::Duration};
 
 use anyhow::{Context, bail};
+use serde::Serialize;
 use serde_json::{Map, Value, json};
 use sqlx::{
     Row,
@@ -156,21 +157,31 @@ impl Store {
     /// and event edits are rejected because the M1 ledger is append-only.
     /// Callers publish `next` only after this transaction commits.
     pub async fn commit_transition(&self, previous: &State, next: &State) -> anyhow::Result<()> {
-        let previous_root = serde_json::to_value(previous)?;
-        let old_object = previous_root
-            .as_object()
-            .context("domain State must serialize to an object")?;
-        let root = serde_json::to_value(next)?;
-        let object = root
-            .as_object()
-            .context("domain State must serialize to an object")?;
+        // Compare typed rows first. A normal transition usually changes only
+        // a handful of records, so avoid serializing the entire event/entity
+        // history just to discover those changes.
+        let changed_lanes = changed_entries(&previous.lanes, &next.lanes, "lanes")?;
+        let changed_runs = changed_entries(&previous.runs, &next.runs, "runs")?;
+        let changed_requests = changed_entries(&previous.requests, &next.requests, "requests")?;
+        let changed_receipts = changed_entries(&previous.receipts, &next.receipts, "receipts")?;
+        let changed_commands = changed_entries(&previous.commands, &next.commands, "commands")?;
+        if next.events.len() < previous.events.len()
+            || next.events[..previous.events.len()] != previous.events[..]
+        {
+            bail!("event history must remain append-only");
+        }
+        let appended_events = next.events[previous.events.len()..]
+            .iter()
+            .map(serde_json::to_value)
+            .collect::<Result<Vec<_>, _>>()?;
+        let draining_changed = previous.draining != next.draining;
         let mut tx = self
             .pool
             .begin_with("BEGIN IMMEDIATE")
             .await
             .context("begin immediate state transaction")?;
 
-        for (id, value) in changed_entries(old_object, object, "lanes")? {
+        for (id, value) in &changed_lanes {
             let entity = encode(value)?;
             let updated_at = string_field(value, "updated_at")
                 .or_else(|| string_field(value, "created_at"))
@@ -200,9 +211,9 @@ impl Store {
             .await?;
         }
 
-        for (id, value) in changed_entries(old_object, object, "runs")? {
+        for (id, value) in &changed_runs {
             let entity = encode(value)?;
-            let run_id = string_field(value, "id").unwrap_or(id);
+            let run_id = string_field(value, "id").unwrap_or(id.as_str());
             sqlx::query(
                 "INSERT INTO runs (id, lane_id, generation, state, phase, replacement_run_id, created_at, phase_started_at, updated_at, entity_json) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -223,9 +234,9 @@ impl Store {
             .await?;
         }
 
-        for (id, value) in changed_entries(old_object, object, "requests")? {
+        for (id, value) in &changed_requests {
             let entity = encode(value)?;
-            let request_id = string_field(value, "id").unwrap_or(id);
+            let request_id = string_field(value, "id").unwrap_or(id.as_str());
             sqlx::query(
                 "INSERT INTO requests (id, lane_id, principal, idempotency_key, request_hash, status, current_run_id, satisfied_by_run, waiting_reason, created_at, entity_json) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
@@ -247,9 +258,9 @@ impl Store {
             .await?;
         }
 
-        for (id, value) in changed_entries(old_object, object, "receipts")? {
+        for (id, value) in &changed_receipts {
             let entity = encode(value)?;
-            let receipt_id = string_field(value, "id").unwrap_or(id);
+            let receipt_id = string_field(value, "id").unwrap_or(id.as_str());
             sqlx::query(
                 "INSERT INTO receipts (id, run_id, observed_at, result, entity_json) VALUES (?, ?, ?, ?, ?) \
                  ON CONFLICT(id) DO UPDATE SET run_id=excluded.run_id, observed_at=excluded.observed_at, result=excluded.result, entity_json=excluded.entity_json \
@@ -264,9 +275,9 @@ impl Store {
             .await?;
         }
 
-        for (id, value) in changed_entries(old_object, object, "commands")? {
+        for (id, value) in &changed_commands {
             let entity = encode(value)?;
-            let command_id = string_field(value, "id").unwrap_or(id);
+            let command_id = string_field(value, "id").unwrap_or(id.as_str());
             sqlx::query(
                 "INSERT INTO commands (id, run_id, generation, kind, delivery_state, payload_digest, created_at, entity_json) \
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?) \
@@ -285,12 +296,7 @@ impl Store {
             .await?;
         }
 
-        let old_events = array_field(old_object, "events")?;
-        let new_events = array_field(object, "events")?;
-        if new_events.len() < old_events.len() || &new_events[..old_events.len()] != old_events {
-            bail!("event history must remain append-only");
-        }
-        for value in &new_events[old_events.len()..] {
+        for value in &appended_events {
             let lane_id = string_field(value, "lane_id").unwrap_or_default();
             let sequence = unsigned_field(value, "sequence");
             let event_id = format!("{lane_id}:{sequence}");
@@ -311,11 +317,11 @@ impl Store {
             .await?;
         }
 
-        if bool_field(old_object, "draining") != bool_field(object, "draining") {
+        if draining_changed {
             sqlx::query(
                 "INSERT INTO runtime_meta(key, value) VALUES ('draining', ?) ON CONFLICT(key) DO UPDATE SET value=excluded.value",
             )
-            .bind(if bool_field(object, "draining") { "true" } else { "false" })
+            .bind(if next.draining { "true" } else { "false" })
             .execute(&mut *tx)
             .await?;
         }
@@ -374,39 +380,26 @@ fn sqlite_version_tuple(version: &str) -> Option<(u64, u64, u64)> {
     ))
 }
 
-fn entity_map<'a>(
-    object: &'a Map<String, Value>,
+fn changed_entries<K, T>(
+    old: &BTreeMap<K, T>,
+    new: &BTreeMap<K, T>,
     key: &str,
-) -> anyhow::Result<&'a Map<String, Value>> {
-    object
-        .get(key)
-        .and_then(Value::as_object)
-        .with_context(|| format!("domain State is missing object field `{key}`"))
-}
-
-fn changed_entries<'a>(
-    old: &'a Map<String, Value>,
-    new: &'a Map<String, Value>,
-    key: &str,
-) -> anyhow::Result<Vec<(&'a str, &'a Value)>> {
-    let old_entities = entity_map(old, key)?;
-    let new_entities = entity_map(new, key)?;
-    if old_entities.keys().any(|id| !new_entities.contains_key(id)) {
+) -> anyhow::Result<Vec<(String, Value)>>
+where
+    K: Ord + Serialize + ToString,
+    T: Eq + Serialize,
+{
+    if old.keys().any(|id| !new.contains_key(id)) {
         bail!("deleting {key} entities is forbidden");
     }
-    Ok(new_entities
-        .iter()
-        .filter(|(id, value)| old_entities.get(*id) != Some(*value))
-        .map(|(id, value)| (id.as_str(), value))
-        .collect())
-}
-
-fn array_field<'a>(object: &'a Map<String, Value>, key: &str) -> anyhow::Result<&'a [Value]> {
-    object
-        .get(key)
-        .and_then(Value::as_array)
-        .map(Vec::as_slice)
-        .with_context(|| format!("domain State is missing array field `{key}`"))
+    new.iter()
+        .filter(|(id, entity)| old.get(*id) != Some(*entity))
+        .map(|(id, entity)| {
+            let value = serde_json::to_value(entity)
+                .with_context(|| format!("encode changed {key} entity"))?;
+            Ok((id.to_string(), value))
+        })
+        .collect()
 }
 
 fn encode(value: &Value) -> anyhow::Result<String> {
@@ -439,10 +432,6 @@ fn unsigned_field(value: &Value, key: &str) -> i64 {
         .and_then(Value::as_u64)
         .and_then(|number| i64::try_from(number).ok())
         .unwrap_or_default()
-}
-
-fn bool_field(value: &Map<String, Value>, key: &str) -> bool {
-    value.get(key).and_then(Value::as_bool).unwrap_or_default()
 }
 
 fn bool_field_value(value: &Value, key: &str) -> bool {
