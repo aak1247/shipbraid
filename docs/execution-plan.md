@@ -11,6 +11,8 @@
 - Plan status：ACTIVE（T-001～T-008 核心实现已落地但验收仍有未闭项；T-009 Dashboard 已完成）。
 - Review gate status：设计评审 PASS；Dashboard 增量独立 review 的三项修正均已解决，ship 结论限于该 review 范围；不代表 M1 验收完成或生产接入批准。
 
+新增独立迭代：[同团队 Agent 发布闭环](features/iter-20261017-agent-workflow/execution-plan.md)（2026-10-17，本轮 DONE 不关闭本计划剩余项）。
+
 ## 2. Scope Lock
 
 允许范围：本仓库 Cargo 工程、src、migrations、tests、配置样例、文档及本项目自身质量检查。一个 package、一个服务、SQLite、HTTP/CLI、受控本地 Git 关系证明、ScriptedExecutor 和 React/TypeScript/Tailwind 只读 Dashboard。
@@ -167,7 +169,7 @@
   - [ ] 完成设计 §10 全场景可重放证据，特别是事务/执行边界 crash、cancel/phase-grant 竞争、current-environment receipt、自动 retry 和安全权限矩阵。
   - [x] `cargo fmt`、`clippy`、`test`、debug/release build、真实子进程场景，以及前端 typecheck/test/build 均通过，命令与结果见 [m1.md](acceptance/m1.md)；启动损坏/权限矩阵仍未覆盖。
   - [ ] 达到 NFR-001：50 requests/s 持续 60s 且 p95 < 250ms，或经评审修改目标。[baseline](acceptance/baseline.json) 与 [load-optimized](acceptance/load-optimized.json) 因 backlog 中止，不是达标证据；最终增量序列化版本的完整测量见 [load-delta.json](acceptance/load-delta.json)：3000 个 202，总耗时 162.323s、p95 14265.768ms（含 Git 校验），未达目标。已解析版本的纯入账性能尚未单列测量，详见 [m1.md](acceptance/m1.md)。
-  - [x] README 准确说明 ScriptedExecutor、单实例限制和 M2/真实部署边界，见 [README](../README.md#auto-deliver)。
+  - [x] README 准确说明 ScriptedExecutor、单实例限制和 M2/真实部署边界，见 [README](../README.md)。
   - Remaining acceptance：完整异常矩阵、启动权限/损坏测试和 NFR-001 性能测量未闭合。
 
 ### Task T-009 — 只读 Dashboard

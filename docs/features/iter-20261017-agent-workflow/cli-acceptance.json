@@ -1,0 +1,16 @@
+{
+  "executor": "http-fixture",
+  "real_deployments": 0,
+  "checks": [
+    "HTTP errors preserve public code/status and redact credentials",
+    "Retry-After and retryability are structured",
+    "permanent non-JSON HTTP errors fail without wait retries or body leakage",
+    "wait resumes after transient read errors without submitting work",
+    "unobserved wait ends within local budget with explicit timeout",
+    "zero-second wait preserves one observation and does not cancel",
+    "parameter/local errors stay structured and omit private inputs",
+    "ambiguous submit retains original key and never automatically reposts",
+    "help/version retain standard successful text output"
+  ],
+  "status": "passed"
+}

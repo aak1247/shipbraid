@@ -1,0 +1,16 @@
+{
+  "executor": "scripted",
+  "checks": [
+    "CLI system and lane discovery expose local tenant/capabilities and enforce lane scope",
+    "three concurrent principals retain separate requests and share one run; equivalent selectors/timezones and a new session replay the same task key and creation session",
+    "unlisted peer cannot withdraw/retry/raise priority; frozen collaborator withdraws only its authorized request",
+    "SIGKILL/restart permits task lookup and CLI wait on the original request; remaining peers share one verified receipt and actor audit survives",
+    "task/principal/status filtering and limit-one cursor traversal return all requests without duplicates; invalid queries are 400",
+    "client-selected tenant/principal and unknown, executor, or out-of-scope collaborators are rejected",
+    "admin can promote another owner's request; urgent retry is denied to an ordinary owner/collaborator and succeeds for admin after synthetic failure",
+    "all six persisted entity tables contain only local tenant rows and SQLite integrity is valid"
+  ],
+  "real_deployments": 0,
+  "synthetic_only": true,
+  "passed": true
+}
