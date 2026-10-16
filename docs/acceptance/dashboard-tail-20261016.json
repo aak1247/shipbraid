@@ -23,7 +23,7 @@
     "post_publish_inspector_width": 1080,
     "post_publish_bearer_auth_401_without_token": true,
     "browser_stores_no_token": true,
-    "independent_source_review": "PASS after related-navigation fix"
+    "independent_source_review": "Identified incompatible filters during related navigation; fixed and verified in fresh browser"
   },
   "log_append_test": {
     "kind": "browser-only intercepted GET fixture",
