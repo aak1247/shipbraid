@@ -490,7 +490,7 @@ fn enum_or_json_field(value: &Value, key: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
+    use std::collections::{BTreeMap, BTreeSet};
 
     use chrono::Utc;
     use uuid::Uuid;
@@ -498,8 +498,8 @@ mod tests {
     use super::*;
     use crate::{
         domain::{
-            CoverageMode, Lane, LineageRelation, Priority, RequestContext, State, SubmitInput,
-            Target, TargetAuthorization,
+            CoverageMode, Lane, LineageRelation, ParameterSpec, Priority, RequestContext, State,
+            SubmitInput, Target, TargetAuthorization,
         },
         engine::Engine,
         lineage::CoverageContext,
@@ -521,6 +521,7 @@ mod tests {
             preemption_enabled: true,
             allowed_revisions: BTreeSet::new(),
             allowed_components: BTreeSet::from(["app".into()]),
+            request_parameters: BTreeMap::new(),
             active_run_id: None,
             generation: 0,
             blocked_reason: None,
@@ -544,6 +545,7 @@ mod tests {
                 release_line_id: "repo:release".into(),
                 config_version: 1,
                 coverage_mode: CoverageMode::Exact,
+                parameters: BTreeMap::new(),
             },
             authorization: TargetAuthorization {
                 repository_id: "repo".into(),
@@ -559,6 +561,46 @@ mod tests {
             deadline_at: None,
             reason: "test".into(),
         }
+    }
+
+    #[tokio::test]
+    async fn configured_request_parameters_round_trip_in_normalized_ledger() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("parameters.db");
+        let store = Store::open(&database).await.unwrap();
+        let mut state = State::default();
+        let previous = state.clone();
+        let engine = Engine::default();
+        let mut configured_lane = lane();
+        configured_lane.request_parameters.insert(
+            "database_backup".into(),
+            ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        );
+        engine
+            .register_lane(&mut state, configured_lane, Utc::now())
+            .unwrap();
+        let mut input = submit(&"a".repeat(40), "backup-policy");
+        input.target.parameters = BTreeMap::from([("database_backup".into(), "skip".into())]);
+        engine
+            .submit(&mut state, input, Utc::now(), &CoverageContext::default())
+            .unwrap();
+        store.commit_transition(&previous, &state).await.unwrap();
+        drop(store);
+
+        let reopened = Store::open(&database).await.unwrap();
+        let restored = reopened.load_state().await.unwrap();
+        assert_eq!(restored, state);
+        assert_eq!(
+            restored.lanes["test"].request_parameters["database_backup"].allowed_values,
+            ["include", "skip"]
+        );
+        assert_eq!(
+            restored.requests.values().next().unwrap().target.parameters["database_backup"],
+            "skip"
+        );
     }
 
     #[tokio::test]

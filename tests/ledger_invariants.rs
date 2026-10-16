@@ -4,7 +4,7 @@ use shipbraid::{
     engine::Engine,
     store::Store,
 };
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use uuid::Uuid;
 
 fn lane() -> Lane {
@@ -23,6 +23,7 @@ fn lane() -> Lane {
         preemption_enabled: false,
         allowed_revisions: BTreeSet::new(),
         allowed_components: BTreeSet::from(["app".into()]),
+        request_parameters: BTreeMap::new(),
         active_run_id: None,
         generation: 0,
         blocked_reason: None,

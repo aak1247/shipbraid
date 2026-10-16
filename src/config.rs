@@ -2,9 +2,12 @@ use anyhow::{Context, Result, bail};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    collections::BTreeMap,
     net::SocketAddr,
     path::{Path, PathBuf},
 };
+
+use crate::domain::{ParameterSpec, validate_parameter_specs};
 
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -74,6 +77,8 @@ pub struct LaneConfig {
     pub release_ref: String,
     pub profile_digest: String,
     pub components: Vec<String>,
+    #[serde(default)]
+    pub request_parameters: BTreeMap<String, ParameterSpec>,
     #[serde(default)]
     pub allow_descendant: bool,
     #[serde(default)]
@@ -254,6 +259,9 @@ impl Config {
                     lane.id
                 );
             }
+            validate_parameter_specs(&lane.request_parameters).map_err(|error| {
+                anyhow::anyhow!("invalid request parameters for lane {}: {error}", lane.id)
+            })?;
             if lane.executor.kind() == "hooks" && lane.allow_preemption {
                 bail!("hook lane {} must disable preemption", lane.id);
             }
@@ -319,18 +327,29 @@ impl Config {
     }
 
     pub fn effective_profile_digest(&self, lane: &LaneConfig) -> Result<String> {
-        match &lane.executor {
-            LaneExecutorConfig::Scripted => Ok(lane.profile_digest.clone()),
-            LaneExecutorConfig::Hooks { .. } => {
-                let serialized = serde_json::to_vec(&lane.executor)
-                    .context("serialize configured executor profile")?;
-                let mut digest = Sha256::new();
-                digest.update(lane.profile_digest.as_bytes());
-                digest.update([0]);
-                digest.update(serialized);
-                Ok(hex::encode(digest.finalize()))
-            }
+        let executor_profile = match &lane.executor {
+            LaneExecutorConfig::Scripted => None,
+            LaneExecutorConfig::Hooks { .. } => Some(
+                serde_json::to_vec(&lane.executor)
+                    .context("serialize configured executor profile")?,
+            ),
+        };
+        if executor_profile.is_none() && lane.request_parameters.is_empty() {
+            return Ok(lane.profile_digest.clone());
         }
+        let mut digest = Sha256::new();
+        digest.update(lane.profile_digest.as_bytes());
+        if let Some(executor_profile) = executor_profile {
+            digest.update([0]);
+            digest.update(executor_profile);
+        }
+        if !lane.request_parameters.is_empty() {
+            let schema = serde_json::to_vec(&lane.request_parameters)
+                .context("serialize configured request parameter schema")?;
+            digest.update([0]);
+            digest.update(schema);
+        }
+        Ok(hex::encode(digest.finalize()))
     }
 }
 
@@ -443,7 +462,73 @@ mod tests {
         assert!(lane.enabled);
         assert!(!lane.allow_descendant);
         assert!(!lane.allow_preemption);
+        assert!(lane.request_parameters.is_empty());
         assert_eq!(lane.executor.kind(), "scripted");
+    }
+
+    #[test]
+    fn request_parameter_schema_defaults_and_config_validation_are_strict() {
+        let temp = tempfile::tempdir().unwrap();
+        let lane: LaneConfig = toml::from_str(&format!(
+            "id='test'\nproject='p'\nenvironment='test'\nrepository_id='r'\nrepository_path='{}'\nrelease_ref='HEAD'\nprofile_digest='base'\ncomponents=['app']\n[request_parameters.database_backup]\nallowed_values=['include','skip']",
+            temp.path().display()
+        ))
+        .unwrap();
+        let spec = &lane.request_parameters["database_backup"];
+        assert!(spec.required, "request parameters are required by default");
+        assert_eq!(spec.allowed_values, ["include", "skip"]);
+
+        let mut invalid_lane = lane.clone();
+        invalid_lane
+            .request_parameters
+            .get_mut("database_backup")
+            .unwrap()
+            .allowed_values = (0..33).map(|index| format!("choice-{index}")).collect();
+        let mut config = Config {
+            lanes: vec![invalid_lane],
+            tokens: vec![TokenConfig {
+                id: "operator".into(),
+                token_env: "OPERATOR_TOKEN".into(),
+                lanes: vec!["test".into()],
+                projects: vec![],
+                urgent: false,
+                admin: false,
+                executor: false,
+            }],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err(), "schema enum size is bounded");
+
+        config.lanes[0]
+            .request_parameters
+            .get_mut("database_backup")
+            .unwrap()
+            .allowed_values = vec!["include".into(), "skip".into()];
+        assert!(config.validate().is_ok());
+    }
+
+    #[test]
+    fn parameter_schema_changes_scripted_profile_but_empty_schema_preserves_legacy_digest() {
+        let mut lane: LaneConfig = toml::from_str(
+            "id='test'\nproject='p'\nenvironment='dev'\nrepository_id='r'\nrepository_path='.'\nrelease_ref='refs/heads/main'\nprofile_digest='base'\ncomponents=['app']",
+        )
+        .unwrap();
+        let config = Config::default();
+        assert_eq!(config.effective_profile_digest(&lane).unwrap(), "base");
+        lane.request_parameters.insert(
+            "database_backup".into(),
+            ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        );
+        let first = config.effective_profile_digest(&lane).unwrap();
+        assert_ne!(first, "base");
+        lane.request_parameters
+            .get_mut("database_backup")
+            .unwrap()
+            .allowed_values = vec!["include".into()];
+        assert_ne!(first, config.effective_profile_digest(&lane).unwrap());
     }
 
     #[test]
@@ -517,6 +602,12 @@ mod tests {
         };
         let config = Config::default();
         let first = config.effective_profile_digest(&lane).unwrap();
+        let serialized = serde_json::to_vec(&lane.executor).unwrap();
+        let mut legacy_digest = Sha256::new();
+        legacy_digest.update(lane.profile_digest.as_bytes());
+        legacy_digest.update([0]);
+        legacy_digest.update(serialized);
+        assert_eq!(first, hex::encode(legacy_digest.finalize()));
         lane.failure_observe = Some(HookConfig::Command {
             program: "/bin/true".into(),
             args: vec![],
@@ -528,6 +619,21 @@ mod tests {
             config.effective_profile_digest(&lane).unwrap(),
             "failure-only observation cannot change the frozen dispatch profile"
         );
+
+        lane.request_parameters.insert(
+            "database_backup".into(),
+            ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        );
+        let schema_bound = config.effective_profile_digest(&lane).unwrap();
+        assert_ne!(
+            first, schema_bound,
+            "request schemas are part of the lane profile"
+        );
+        lane.request_parameters.clear();
+        assert_eq!(first, config.effective_profile_digest(&lane).unwrap());
 
         let LaneExecutorConfig::Hooks { dispatch, .. } = &mut lane.executor else {
             unreachable!()

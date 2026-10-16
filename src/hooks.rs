@@ -369,6 +369,7 @@ mod tests {
             release_line_id: "line".into(),
             config_version: 1,
             coverage_mode: CoverageMode::Exact,
+            parameters: BTreeMap::new(),
         };
         let run_id = Uuid::new_v4();
         let lane = Lane {
@@ -386,6 +387,7 @@ mod tests {
             preemption_enabled: false,
             allowed_revisions: BTreeSet::new(),
             allowed_components: BTreeSet::from(["app".into()]),
+            request_parameters: BTreeMap::new(),
             active_run_id: Some(run_id),
             generation: 1,
             blocked_reason: None,

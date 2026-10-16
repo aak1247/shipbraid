@@ -198,6 +198,7 @@ impl Service {
                     && matches!(&lane_config.executor, LaneExecutorConfig::Scripted),
                 allowed_revisions: BTreeSet::new(),
                 allowed_components: lane_config.components.iter().cloned().collect(),
+                request_parameters: lane_config.request_parameters.clone(),
                 active_run_id: None,
                 generation: 0,
                 blocked_reason: None,
@@ -392,6 +393,39 @@ impl Service {
         reason: String,
         context: RequestContext,
     ) -> Result<SubmitOutcome, ServiceError> {
+        self.submit_with_parameters(
+            principal,
+            idempotency_key,
+            request_hash,
+            lane_id,
+            revision,
+            components,
+            coverage_mode,
+            priority,
+            deadline_at,
+            reason,
+            context,
+            BTreeMap::new(),
+        )
+        .await
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub async fn submit_with_parameters(
+        &self,
+        principal: String,
+        idempotency_key: String,
+        request_hash: String,
+        lane_id: String,
+        revision: String,
+        components: Vec<String>,
+        coverage_mode: CoverageMode,
+        priority: Priority,
+        deadline_at: Option<chrono::DateTime<Utc>>,
+        reason: String,
+        context: RequestContext,
+        parameters: BTreeMap<String, String>,
+    ) -> Result<SubmitOutcome, ServiceError> {
         // Resolve Git ancestry before taking the serialized ledger writer.
         // Concurrent submissions can therefore do their read-only local Git
         // checks in parallel instead of holding up commits behind a child
@@ -410,6 +444,8 @@ impl Service {
             .get(&lane_id)
             .cloned()
             .ok_or_else(|| DomainError::LaneNotFound(lane_id.clone()))?;
+        crate::domain::validate_parameters(&preliminary_lane.request_parameters, &parameters)
+            .map_err(DomainError::TargetNotAllowed)?;
         let lineage = self.lineage.clone();
         let repository_id = preliminary_lane.repository_id.clone();
         let release_ref = preliminary_lane.release_ref.clone();
@@ -461,6 +497,7 @@ impl Service {
             release_line_id: lane.release_line_id.clone(),
             config_version: lane.config_version,
             coverage_mode,
+            parameters,
         };
         let is_replay = previous.requests.values().any(|request| {
             request.principal == principal
@@ -979,6 +1016,7 @@ impl Service {
                         || candidate.release_line_id != request.release_line_id
                         || candidate.config_version != request.config_version
                         || candidate.profile_digest != request.profile_digest
+                        || candidate.parameters != request.parameters
                         || !request.components.is_subset(&candidate.components)
                         || request.coverage_mode != CoverageMode::Descendant
                         || !is_full_revision(&candidate.revision)
@@ -2313,6 +2351,7 @@ fn lane_config_matches(existing: &Lane, desired: &Lane) -> bool {
         && existing.preemption_enabled == desired.preemption_enabled
         && existing.allowed_revisions == desired.allowed_revisions
         && existing.allowed_components == desired.allowed_components
+        && existing.request_parameters == desired.request_parameters
 }
 
 fn bounded_text(value: &str, limit: usize) -> String {
@@ -2426,6 +2465,7 @@ mod tests {
                 allow_descendant: false,
                 allow_preemption: false,
                 failure_observe: None,
+                request_parameters: BTreeMap::new(),
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
             }],
@@ -2513,6 +2553,7 @@ print(json.dumps(reply))
                 allow_descendant: false,
                 allow_preemption: false,
                 failure_observe: None,
+                request_parameters: BTreeMap::new(),
                 enabled: true,
                 executor: LaneExecutorConfig::Hooks {
                     dispatch: hook.clone(),
@@ -2545,6 +2586,7 @@ print(json.dumps(reply))
                     release_line_id: lane.release_line_id.clone(),
                     config_version: lane.config_version,
                     coverage_mode: CoverageMode::Exact,
+                    parameters: BTreeMap::new(),
                 };
                 engine.submit(
                     state,

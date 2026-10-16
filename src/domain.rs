@@ -7,10 +7,109 @@ use uuid::Uuid;
 
 pub type Id = Uuid;
 
+const MAX_REQUEST_PARAMETERS: usize = 16;
+const MAX_PARAMETER_KEY_BYTES: usize = 64;
+const MAX_PARAMETER_VALUE_BYTES: usize = 1024;
+const MAX_PARAMETER_ALLOWED_VALUES: usize = 32;
+
 pub const LOCAL_TENANT_ID: &str = "local";
 
 pub fn default_local_tenant() -> String {
     LOCAL_TENANT_ID.to_owned()
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ParameterSpec {
+    #[serde(default = "default_required")]
+    pub required: bool,
+    #[serde(default)]
+    pub allowed_values: Vec<String>,
+}
+
+impl Default for ParameterSpec {
+    fn default() -> Self {
+        Self {
+            required: true,
+            allowed_values: Vec::new(),
+        }
+    }
+}
+
+fn default_required() -> bool {
+    true
+}
+
+/// Validate an administrator-defined request-parameter schema.
+pub fn validate_parameter_specs(specs: &BTreeMap<String, ParameterSpec>) -> Result<(), String> {
+    if specs.len() > MAX_REQUEST_PARAMETERS {
+        return Err(format!(
+            "at most {MAX_REQUEST_PARAMETERS} request parameters are allowed"
+        ));
+    }
+    for (key, spec) in specs {
+        if !valid_parameter_text(key, MAX_PARAMETER_KEY_BYTES) {
+            return Err(
+                "parameter keys must be nonempty, bounded, and contain no control characters"
+                    .to_owned(),
+            );
+        }
+        if spec.allowed_values.len() > MAX_PARAMETER_ALLOWED_VALUES {
+            return Err(format!("parameter {key} has too many allowed values"));
+        }
+        let mut unique = std::collections::BTreeSet::new();
+        for value in &spec.allowed_values {
+            if !valid_parameter_text(value, MAX_PARAMETER_VALUE_BYTES) {
+                return Err(format!(
+                    "parameter {key} has an empty or oversized allowed value"
+                ));
+            }
+            if !unique.insert(value) {
+                return Err(format!("parameter {key} has duplicate allowed values"));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate untrusted string parameters against a lane's frozen schema.
+pub fn validate_parameters(
+    specs: &BTreeMap<String, ParameterSpec>,
+    values: &BTreeMap<String, String>,
+) -> Result<(), String> {
+    validate_parameter_specs(specs)?;
+    if values.len() > MAX_REQUEST_PARAMETERS {
+        return Err(format!(
+            "at most {MAX_REQUEST_PARAMETERS} request parameters are allowed"
+        ));
+    }
+    for (key, value) in values {
+        if !valid_parameter_text(key, MAX_PARAMETER_KEY_BYTES) {
+            return Err(
+                "parameter keys must be nonempty, bounded, and contain no control characters"
+                    .to_owned(),
+            );
+        }
+        let spec = specs
+            .get(key)
+            .ok_or_else(|| format!("unknown request parameter: {key}"))?;
+        if !valid_parameter_text(value, MAX_PARAMETER_VALUE_BYTES) {
+            return Err(format!("parameter {key} must be a nonempty bounded string"));
+        }
+        if !spec.allowed_values.is_empty() && !spec.allowed_values.contains(value) {
+            return Err(format!("parameter {key} is outside its allowed values"));
+        }
+    }
+    for (key, spec) in specs {
+        if spec.required && !values.contains_key(key) {
+            return Err(format!("required request parameter is missing: {key}"));
+        }
+    }
+    Ok(())
+}
+
+fn valid_parameter_text(value: &str, max_bytes: usize) -> bool {
+    !value.trim().is_empty() && value.len() <= max_bytes && !value.chars().any(char::is_control)
 }
 
 fn deserialize_local_tenant<'de, D>(deserializer: D) -> Result<String, D::Error>
@@ -125,6 +224,8 @@ pub struct Target {
     pub release_line_id: String,
     pub config_version: u64,
     pub coverage_mode: CoverageMode,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub parameters: BTreeMap<String, String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -147,6 +248,8 @@ pub struct Lane {
     pub preemption_enabled: bool,
     pub allowed_revisions: BTreeSet<String>,
     pub allowed_components: BTreeSet<String>,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub request_parameters: BTreeMap<String, ParameterSpec>,
     pub active_run_id: Option<Id>,
     pub generation: u64,
     pub blocked_reason: Option<String>,
@@ -434,4 +537,121 @@ pub enum DomainError {
     OwnershipUnproven,
     #[error("identifier already exists")]
     DuplicateId,
+}
+
+#[cfg(test)]
+mod parameter_tests {
+    use super::{Lane, ParameterSpec, Target, validate_parameters};
+    use std::collections::BTreeMap;
+
+    fn schema() -> BTreeMap<String, ParameterSpec> {
+        BTreeMap::from([(
+            "database_backup".to_owned(),
+            ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".to_owned(), "skip".to_owned()],
+            },
+        )])
+    }
+
+    #[test]
+    fn parameter_schema_requires_known_nonempty_bounded_values() {
+        let specs = schema();
+        assert!(validate_parameters(&specs, &BTreeMap::new()).is_err());
+        assert!(
+            validate_parameters(
+                &specs,
+                &BTreeMap::from([("database_backup".into(), "automatic".into())]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_parameters(
+                &specs,
+                &BTreeMap::from([
+                    ("database_backup".into(), "include".into()),
+                    ("untrusted".into(), "value".into()),
+                ]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_parameters(
+                &specs,
+                &BTreeMap::from([("database_backup".into(), " ".into())]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_parameters(
+                &specs,
+                &BTreeMap::from([("database_backup".into(), "x".repeat(1025))]),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_parameters(&specs, &BTreeMap::from([("x".repeat(65), "value".into())]),)
+                .is_err()
+        );
+        assert!(
+            validate_parameters(
+                &specs,
+                &BTreeMap::from([("database_backup".into(), "include".into())]),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn optional_parameter_can_be_omitted_and_schema_defaults_are_required() {
+        let parsed: ParameterSpec = serde_json::from_str("{}").unwrap();
+        assert!(parsed.required);
+        assert!(parsed.allowed_values.is_empty());
+        assert!(serde_json::from_str::<ParameterSpec>(r#"{"required":false,"extra":1}"#).is_err());
+        let optional = BTreeMap::from([(
+            "note".to_owned(),
+            ParameterSpec {
+                required: false,
+                allowed_values: Vec::new(),
+            },
+        )]);
+        assert!(validate_parameters(&optional, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn old_lane_and_target_json_without_parameter_fields_remains_compatible() {
+        let mut lane_json = serde_json::json!({
+            "id": "test", "project": "p", "environment": "dev", "enabled": true,
+            "repository_id": "repo", "release_ref": "refs/heads/main",
+            "release_line_id": "stable", "profile_digest": "profile",
+            "config_version": 1, "descendant_coverage_enabled": false,
+            "preemption_enabled": false, "allowed_revisions": [],
+            "allowed_components": ["app"], "active_run_id": null, "generation": 0,
+            "blocked_reason": null, "failure_paused": false
+        });
+        lane_json.as_object_mut().unwrap().remove("tenant_id");
+        let lane: Lane = serde_json::from_value(lane_json).unwrap();
+        assert!(lane.request_parameters.is_empty());
+        assert!(
+            serde_json::to_value(&lane)
+                .unwrap()
+                .get("request_parameters")
+                .is_none()
+        );
+
+        let target: Target = serde_json::from_value(serde_json::json!({
+            "repository_id": "repo", "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "components": ["app"], "profile_digest": "profile",
+            "release_line_id": "stable", "config_version": 1,
+            "coverage_mode": "exact"
+        }))
+        .unwrap();
+        assert!(target.parameters.is_empty());
+        assert!(
+            serde_json::to_value(&target)
+                .unwrap()
+                .get("parameters")
+                .is_none()
+        );
+    }
 }

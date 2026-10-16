@@ -191,6 +191,20 @@ def _validate_full_sha(value):
     return value
 
 
+def _database_backup_policy(target):
+    parameters = target.get('parameters') if isinstance(target, dict) else None
+    if (not isinstance(parameters, dict)
+            or set(parameters) != {'database_backup'}
+            or parameters.get('database_backup') not in ('include', 'skip')):
+        raise RuntimeError('production target must explicitly choose database_backup include or skip')
+    return parameters['database_backup']
+
+
+def _database_backup_flag(target):
+    policy = _database_backup_policy(target)
+    return ['--include-db-backup'] if policy == 'include' else ['--skip-db-backup']
+
+
 def _unit_name(identifier, generation):
     return f'{JOB_UNIT_PREFIX}{identifier}-{generation}.service'
 
@@ -212,6 +226,7 @@ def context(envelope, args):
     if not isinstance(target, dict):
         raise RuntimeError('production target is missing')
     _validate_full_sha(target.get('revision'))
+    _database_backup_policy(target)
     if target.get('components') != ['app', 'website', 'worker']:
         raise RuntimeError('production target must contain app, website, and worker in canonical order')
     if not isinstance(target.get('profile_digest'), str) or not target['profile_digest']:
@@ -438,6 +453,11 @@ def hook(envelope, args):
     if not isinstance(saved_proof, dict) or not isinstance(saved_proof.get('core'), dict):
         return {**output, 'status': 'unknown',
             'message': 'Production release has no independent three-component proof'}
+    selected_policy = _database_backup_policy(target)
+    if (saved_proof['core'].get('database_backup_policy') != selected_policy
+            or saved_proof['core'].get('target_parameters') != target['parameters']):
+        return {**output, 'status': 'unknown',
+            'message': 'Production proof does not match the frozen database backup policy'}
     if operation == 'observe':
         return {**output, 'status': 'completed',
             'message': 'Production release completed; independent verification is available'}
@@ -891,6 +911,8 @@ def capture_proof(repository, target, worker_before):
     core = {
         'source_revision': revision,
         'source_tree': tree,
+        'target_parameters': dict(target['parameters']),
+        'database_backup_policy': _database_backup_policy(target),
         'components': {
             'app': {
                 'image_tag': app_tag,
@@ -1013,7 +1035,7 @@ def worker(request_path, args):
         with log_path.open('ab', buffering=0) as output:
             completed = subprocess.run([
                 'bash', str(release_script), 'prod', 'all', '--from-git',
-                '--ref', target['revision'], '--include-db-backup',
+                '--ref', target['revision'], *_database_backup_flag(target),
             ], cwd=runner, env=env, stdin=subprocess.DEVNULL, stdout=output,
                 stderr=subprocess.STDOUT, check=False)
         exit_code = completed.returncode

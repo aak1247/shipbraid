@@ -10,7 +10,7 @@ use crate::{
         DeploymentReceipt, DomainError, Event, ExecutorResult, LOCAL_TENANT_ID, Lane, Phase,
         Priority, ReceiptResult, ReconcileIds, ReconcileOutcome, ReleaseRequest, RequestStatus,
         RunState, State, SubmitInput, SubmitOutcome, Target, TargetAuthorization,
-        UnknownResolution,
+        UnknownResolution, validate_parameter_specs, validate_parameters,
     },
     lineage::{CoverageContext, CoverageQuery, is_full_revision},
 };
@@ -60,6 +60,8 @@ impl Engine {
                 "only the local tenant is supported".to_owned(),
             ));
         }
+        validate_parameter_specs(&lane.request_parameters)
+            .map_err(DomainError::TargetNotAllowed)?;
         if lane.id.trim().is_empty()
             || lane.project.trim().is_empty()
             || lane.environment.trim().is_empty()
@@ -899,6 +901,7 @@ impl Engine {
                     || candidate.release_line_id != target.release_line_id
                     || candidate.config_version != target.config_version
                     || candidate.profile_digest != target.profile_digest
+                    || candidate.parameters != target.parameters
                     || !target.components.is_subset(&candidate.components)
                     || !is_full_revision(&candidate.revision)
                     || !is_full_revision(&target.revision)
@@ -1671,6 +1674,7 @@ impl Engine {
                     release_line_id: run.target.release_line_id.clone(),
                     config_version: run.target.config_version,
                     coverage_mode: run.target.coverage_mode.clone(),
+                    parameters: run.target.parameters.clone(),
                 };
                 let request_ids = state
                     .requests
@@ -2001,6 +2005,7 @@ type CandidateTargetKey<'a> = (
     &'a str,
     &'a str,
     &'a std::collections::BTreeSet<String>,
+    &'a BTreeMap<String, String>,
     &'a str,
     &'a str,
     u64,
@@ -2012,6 +2017,7 @@ fn candidate_target_key(target: &Target) -> CandidateTargetKey<'_> {
         &target.repository_id,
         &target.revision,
         &target.components,
+        &target.parameters,
         &target.profile_digest,
         &target.release_line_id,
         target.config_version,
@@ -2046,6 +2052,8 @@ fn validate_target(
     target: &Target,
     authorization: &TargetAuthorization,
 ) -> Result<(), DomainError> {
+    validate_parameters(&lane.request_parameters, &target.parameters)
+        .map_err(DomainError::TargetNotAllowed)?;
     if !target_matches_lane(lane, target) {
         return Err(DomainError::TargetNotAllowed(
             "target repository, release line, profile, or config version differs from lane"
@@ -2093,6 +2101,7 @@ fn target_matches_lane(lane: &Lane, target: &Target) -> bool {
         && target.profile_digest == lane.profile_digest
         && target.release_line_id == lane.release_line_id
         && target.config_version == lane.config_version
+        && validate_parameters(&lane.request_parameters, &target.parameters).is_ok()
         && !target.components.is_empty()
         && target.components.is_subset(&lane.allowed_components)
         && (lane.allowed_revisions.is_empty() || lane.allowed_revisions.contains(&target.revision))
@@ -2112,6 +2121,7 @@ fn target_covers(
         || candidate.release_line_id != request.release_line_id
         || candidate.config_version != request.config_version
         || candidate.profile_digest != request.profile_digest
+        || candidate.parameters != request.parameters
         || !request.components.is_subset(&candidate.components)
         || !is_full_revision(&candidate.revision)
         || !is_full_revision(&request.revision)
@@ -2327,6 +2337,7 @@ fn lane_config_changed(existing: &Lane, desired: &Lane) -> bool {
         || existing.preemption_enabled != desired.preemption_enabled
         || existing.allowed_revisions != desired.allowed_revisions
         || existing.allowed_components != desired.allowed_components
+        || existing.request_parameters != desired.request_parameters
         || existing.enabled != desired.enabled
 }
 
@@ -2562,6 +2573,7 @@ mod tests {
             preemption_enabled: true,
             allowed_revisions: BTreeSet::new(),
             allowed_components: BTreeSet::from(["app".to_owned(), "worker".to_owned()]),
+            request_parameters: BTreeMap::new(),
             active_run_id: None,
             generation: 0,
             blocked_reason: None,
@@ -2578,6 +2590,7 @@ mod tests {
             release_line_id: "stable".to_owned(),
             config_version: 1,
             coverage_mode,
+            parameters: BTreeMap::new(),
         }
     }
 
@@ -2610,6 +2623,41 @@ mod tests {
         at: i64,
         coverage: &CoverageContext,
     ) -> uuid::Uuid {
+        submit_with_parameters(
+            state,
+            engine,
+            request_id,
+            lane_id,
+            revision,
+            components,
+            mode,
+            priority,
+            at,
+            BTreeMap::new(),
+            coverage,
+        )
+        .unwrap()
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Fixture inputs keep request parameters and ownership boundaries explicit"
+    )]
+    fn submit_with_parameters(
+        state: &mut State,
+        engine: &Engine,
+        request_id: u128,
+        lane_id: &str,
+        revision: &str,
+        components: &[&str],
+        mode: CoverageMode,
+        priority: Priority,
+        at: i64,
+        parameters: BTreeMap<String, String>,
+        coverage: &CoverageContext,
+    ) -> Result<uuid::Uuid, crate::domain::DomainError> {
+        let mut request_target = target(revision, components, mode);
+        request_target.parameters = parameters;
         engine
             .submit(
                 state,
@@ -2620,7 +2668,7 @@ mod tests {
                     idempotency_key: format!("idem-{request_id}"),
                     request_hash: format!("body-{request_id}"),
                     lane_id: lane_id.to_owned(),
-                    target: target(revision, components, mode),
+                    target: request_target,
                     authorization: authorization(revision),
                     priority,
                     deadline_at: None,
@@ -2629,8 +2677,7 @@ mod tests {
                 time(at),
                 coverage,
             )
-            .unwrap()
-            .request_id
+            .map(|outcome| outcome.request_id)
     }
 
     fn proof(candidate: &str, requested: &str, relation: LineageRelation) -> LineageProof {
@@ -2793,6 +2840,205 @@ mod tests {
         assert_eq!(idle, ReconcileOutcome::Idle);
         assert_eq!(state.runs[&first_run].phase_started_at, time(3));
         assert_eq!(state.runs[&first_run].updated_at, time(3));
+    }
+
+    #[test]
+    fn request_parameters_are_required_known_and_bounded_by_lane_schema() {
+        let engine = Engine::default();
+        let mut configured_lane = lane("lane-a");
+        configured_lane.request_parameters.insert(
+            "database_backup".into(),
+            crate::domain::ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        );
+        let mut state = State::default();
+        engine
+            .register_lane(&mut state, configured_lane, time(0))
+            .unwrap();
+
+        for (id, parameters) in [
+            (1, BTreeMap::new()),
+            (
+                2,
+                BTreeMap::from([("database_backup".into(), "automatic".into())]),
+            ),
+            (
+                3,
+                BTreeMap::from([
+                    ("database_backup".into(), "include".into()),
+                    ("untrusted".into(), "value".into()),
+                ]),
+            ),
+            (
+                4,
+                BTreeMap::from([("database_backup".into(), "x".repeat(1025))]),
+            ),
+        ] {
+            assert!(
+                submit_with_parameters(
+                    &mut state,
+                    &engine,
+                    id,
+                    "lane-a",
+                    &"a".repeat(40),
+                    &["app"],
+                    CoverageMode::Exact,
+                    Priority::Normal,
+                    id as i64,
+                    parameters,
+                    &CoverageContext::default(),
+                )
+                .is_err()
+            );
+        }
+        assert!(state.requests.is_empty());
+    }
+
+    #[test]
+    fn requests_share_and_receipts_cover_only_identical_parameters() {
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut configured_lane = lane("lane-a");
+        configured_lane.request_parameters.insert(
+            "database_backup".into(),
+            crate::domain::ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        );
+        let mut state = State::default();
+        engine
+            .register_lane(&mut state, configured_lane, time(0))
+            .unwrap();
+        let include = BTreeMap::from([("database_backup".into(), "include".into())]);
+        let skip = BTreeMap::from([("database_backup".into(), "skip".into())]);
+        let first_request = submit_with_parameters(
+            &mut state,
+            &engine,
+            1,
+            "lane-a",
+            &"a".repeat(40),
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            include.clone(),
+            &CoverageContext::default(),
+        )
+        .unwrap();
+        let run_id = dispatched_run(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(2),
+                    ReconcileIds {
+                        run_id: ids(100),
+                        command_id: ids(101),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+        );
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec-a",
+                ExecutorResult::Started {
+                    executor_ref: "exec-a".into(),
+                },
+                time(3),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        let same_policy = submit_with_parameters(
+            &mut state,
+            &engine,
+            2,
+            "lane-a",
+            &"a".repeat(40),
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            4,
+            include,
+            &CoverageContext::default(),
+        )
+        .unwrap();
+        assert_eq!(state.requests[&same_policy].current_run_id, Some(run_id));
+
+        let descendant = "b".repeat(40);
+        let candidate_revision = "a".repeat(40);
+        let lineage = context(&[(&candidate_revision, &descendant, LineageRelation::Ancestor)]);
+        let different_policy = submit_with_parameters(
+            &mut state,
+            &engine,
+            3,
+            "lane-a",
+            &descendant,
+            &["app"],
+            CoverageMode::Descendant,
+            Priority::Urgent,
+            5,
+            skip.clone(),
+            &lineage,
+        )
+        .unwrap();
+        assert_eq!(state.requests[&different_policy].current_run_id, None);
+        assert!(engine.coverage_queries(&state, "lane-a").is_empty());
+
+        let receipt = DeploymentReceipt {
+            id: ids(300),
+            run_id,
+            generation: 1,
+            observed_at: time(6),
+            source_revision: "a".repeat(40),
+            component_digests: BTreeMap::from([("app".into(), "digest-app".into())]),
+            profile_digest: "profile-1".into(),
+            verification_report: "database_backup=include".into(),
+            result: ReceiptResult::Success,
+        };
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec-a",
+                ExecutorResult::VerifiedReceipt(receipt),
+                time(7),
+                &lineage,
+            )
+            .unwrap();
+        assert_eq!(
+            state.requests[&first_request].status,
+            RequestStatus::Satisfied
+        );
+        assert_eq!(
+            state.requests[&same_policy].status,
+            RequestStatus::Satisfied
+        );
+        assert_ne!(
+            state.requests[&different_policy].status,
+            RequestStatus::Satisfied
+        );
+
+        let mut candidate = target(&candidate_revision, &["app"], CoverageMode::Exact);
+        candidate.parameters = BTreeMap::from([("database_backup".into(), "include".into())]);
+        let mut requested = target(&descendant, &["app"], CoverageMode::Descendant);
+        requested.parameters = skip.clone();
+        assert!(
+            super::target_covers(&candidate, &requested, "lane-a", "lane-a", &lineage).is_none()
+        );
+        requested.parameters = candidate.parameters.clone();
+        assert!(
+            super::target_covers(&candidate, &requested, "lane-a", "lane-a", &lineage).is_some()
+        );
     }
 
     #[test]

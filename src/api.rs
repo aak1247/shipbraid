@@ -224,6 +224,8 @@ impl From<ServiceError> for ApiError {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct SubmitBody {
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    parameters: std::collections::BTreeMap<String, String>,
     #[serde(default)]
     lane_id: Option<String>,
     #[serde(default)]
@@ -829,12 +831,15 @@ async fn create_request(
     if body.task_id.is_some() || !body.collaborators.is_empty() {
         body_value["context"] = json!({"task_id":body.task_id,"collaborators":body.collaborators});
     }
+    if !body.parameters.is_empty() {
+        body_value["parameters"] = json!(body.parameters);
+    }
     let request_hash = hex::encode(Sha256::digest(
         serde_json::to_vec(&body_value).unwrap_or_default(),
     ));
     let outcome = state
         .service
-        .submit_with_context(
+        .submit_with_parameters(
             actor.id.clone(),
             idempotency_key.to_owned(),
             request_hash,
@@ -850,6 +855,7 @@ async fn create_request(
                 session_id: body.session_id,
                 collaborators: body.collaborators,
             },
+            body.parameters,
         )
         .await?;
     let snapshot = state.service.snapshot().await;
@@ -1316,6 +1322,7 @@ fn lane_view(lane: &Lane, executor_kind: &str) -> Value {
         "tenant_id": lane.tenant_id,
         "repository_id": lane.repository_id,
         "components": lane.allowed_components,
+        "request_parameters": lane.request_parameters,
         "coverage_modes": if lane.descendant_coverage_enabled { vec!["exact", "descendant"] } else { vec!["exact"] },
         "project": lane.project,
         "environment": lane.environment,
@@ -1349,6 +1356,7 @@ fn request_view(request: &ReleaseRequest, snapshot: &DomainState, actor: &Actor)
         "lane_id": request.lane_id,
         "revision": request.target.revision,
         "components": request.target.components,
+        "parameters": request.target.parameters,
         "coverage_mode": request.target.coverage_mode,
         "priority": request.priority,
         "status": request.status,
@@ -1373,6 +1381,7 @@ fn run_view(run: &DeliveryRun, snapshot: &DomainState) -> Value {
         "lane_id": run.lane_id,
         "revision": run.target.revision,
         "components": run.target.components,
+        "parameters": run.target.parameters,
         "profile_digest": run.target.profile_digest,
         "coverage_mode": run.target.coverage_mode,
         "effective_priority": run.effective_priority,
@@ -1488,6 +1497,13 @@ mod tests {
     }
 
     async fn team_fixture_with_lane(lane_one_id: &str) -> TeamFixture {
+        team_fixture_with_parameters(lane_one_id, Default::default()).await
+    }
+
+    async fn team_fixture_with_parameters(
+        lane_one_id: &str,
+        parameters: std::collections::BTreeMap<String, crate::domain::ParameterSpec>,
+    ) -> TeamFixture {
         let temp = tempfile::tempdir().unwrap();
         let work = temp.path().join("work");
         std::fs::create_dir(&work).unwrap();
@@ -1553,6 +1569,7 @@ mod tests {
             allow_descendant: true,
             allow_preemption: true,
             failure_observe: None,
+            request_parameters: parameters.clone(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
         };
@@ -1982,6 +1999,7 @@ mod tests {
             allow_descendant: true,
             allow_preemption: true,
             failure_observe: None,
+            request_parameters: Default::default(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
         };
@@ -2079,5 +2097,58 @@ mod tests {
                 .unwrap();
         assert_eq!(reused["id"], payload["id"]);
         assert_eq!(reused["reused"], true);
+    }
+    #[tokio::test]
+    async fn project_parameters_are_required_frozen_and_part_of_idempotency() {
+        let schema = [(
+            "database_backup".to_owned(),
+            crate::domain::ParameterSpec {
+                required: true,
+                allowed_values: vec!["include".into(), "skip".into()],
+            },
+        )]
+        .into_iter()
+        .collect();
+        let f = team_fixture_with_parameters("lane-one", schema).await;
+        let before = f.service.snapshot().await;
+        for values in [
+            json!({}),
+            json!({"database_backup":"auto"}),
+            json!({"database_backup":"skip", "command":"arbitrary"}),
+        ] {
+            let mut body = f.body();
+            body["parameters"] = values;
+            let (status, _) = f.submit("alice", "invalid-parameters", body).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        }
+        assert_eq!(
+            f.service.snapshot().await.requests.len(),
+            before.requests.len()
+        );
+        assert!(f.service.snapshot().await.runs.is_empty());
+        let mut body = f.body();
+        body["parameters"] = json!({"database_backup":"skip"});
+        let (status, first) = f.submit("alice", "explicit-policy", body.clone()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(first["parameters"]["database_backup"], "skip");
+        let (status, replay) = f.submit("alice", "explicit-policy", body.clone()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(first["id"], replay["id"]);
+        body["parameters"]["database_backup"] = json!("include");
+        assert_eq!(
+            f.submit("alice", "explicit-policy", body).await.0,
+            StatusCode::CONFLICT
+        );
+        let id = Uuid::parse_str(first["id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            f.service.snapshot().await.requests[&id].target.parameters["database_backup"],
+            "skip"
+        );
+        let (status, lane) = f.call("alice", "GET", "/v1/lanes/lane-one", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            lane["request_parameters"]["database_backup"]["required"],
+            true
+        );
     }
 }

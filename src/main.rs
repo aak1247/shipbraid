@@ -72,6 +72,9 @@ enum Command {
         /// Configured principal allowed to manage this request (repeatable).
         #[arg(long = "collaborator")]
         collaborators: Vec<String>,
+        /// Frozen non-secret execution parameter (repeatable KEY=VALUE).
+        #[arg(long = "param")]
+        parameters: Vec<String>,
     },
     /// Wait locally; timeout/disconnect does not withdraw the server request.
     Wait {
@@ -511,6 +514,7 @@ async fn run(cli: Cli) -> Result<u8> {
             task_id,
             session_id,
             mut collaborators,
+            parameters,
         } => {
             let mut components = components;
             components.sort();
@@ -533,6 +537,28 @@ async fn run(cli: Cli) -> Result<u8> {
                     )
                 })?;
             let mut body = json!({"revision":revision,"components":components,"coverage_mode":coverage.as_str(),"priority":priority.as_str(),"deadline_at":deadline,"reason":reason});
+            let mut frozen_parameters = std::collections::BTreeMap::new();
+            for parameter in parameters {
+                let (key, value) = parameter.split_once('=').ok_or_else(|| {
+                    CliFailure::new("invalid_parameter", "Use --param KEY=VALUE.", false)
+                })?;
+                if key.is_empty()
+                    || value.is_empty()
+                    || frozen_parameters
+                        .insert(key.to_owned(), value.to_owned())
+                        .is_some()
+                {
+                    return Err(CliFailure::new(
+                        "invalid_parameter",
+                        "Parameter names must be unique and values nonempty.",
+                        false,
+                    )
+                    .into());
+                }
+            }
+            if !frozen_parameters.is_empty() {
+                body["parameters"] = json!(frozen_parameters);
+            }
             if let Some(task_id) = &task_id {
                 body["task_id"] = json!(task_id);
             }
