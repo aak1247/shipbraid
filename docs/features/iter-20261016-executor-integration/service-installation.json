@@ -1,0 +1,9 @@
+{
+  "unit": "auto-deliver.service",
+  "listen": "127.0.0.1:8787",
+  "release": "/home/yahui/.local/share/auto-deliver/releases/880c1defa77b-6772c0140504",
+  "config": "/home/yahui/.config/auto-deliver/config.toml",
+  "operator_token_file": "/home/yahui/.config/auto-deliver/operator.token",
+  "admin_token_file": "/home/yahui/.config/auto-deliver/admin.token",
+  "production_enabled": false
+}

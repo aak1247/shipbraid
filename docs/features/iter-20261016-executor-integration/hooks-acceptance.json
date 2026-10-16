@@ -1,0 +1,16 @@
+{
+  "fixture": "synthetic external hooks",
+  "real_deployments": 0,
+  "checks": [
+    "HTTP and CLI project/environment selectors resolve separate lanes; lane-scoped token gets 403 across environments",
+    "empty HTTP 202 did not establish Started; later webhook observation and independent synthetic receipt completed the run",
+    "restart performed fresh read-only verification without a second dispatch",
+    "malformed stdout, nonzero command exit, and webhook timeout stay unknown without successful receipts"
+  ],
+  "runs": {
+    "command": "0c291ed7-4c9f-4cf9-80b4-d52af60e2c47",
+    "script": "832d9629-b31d-4b77-829c-d5528489128b",
+    "webhook": "616b5810-d612-4985-8a8d-216703019851"
+  },
+  "synthetic_only": true
+}

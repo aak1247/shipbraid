@@ -1,0 +1,19 @@
+{
+  "executor": "scripted",
+  "checks": [
+    "unauthenticated reads, cross-lane reads and unauthorized urgent denied",
+    "second process cannot acquire database ownership",
+    "100 concurrent callers share one verified run; idempotency replay/conflict correct",
+    "urgent descendant supersedes stoppable normal run; both requests settle from successor receipt",
+    "unknown retains ownership; human stop assertion rejected; independent scripted observation restores running",
+    "covered urgent promotes current run; CLI local timeout does not withdraw request",
+    "SIGKILL/restart observes durable scripted execution without creating replacement run",
+    "real run logs and monotonic audit cursors readable; explicit drain/resume works",
+    "online SQLite backup/restore retains receipts, idempotency and persistent drain",
+    "executor role enforced; confirmed failure pauses lane; new requests do not unpause; explicit retry preserves target"
+  ],
+  "real_deployments": 0,
+  "concurrent_100_submit_p95_ms": 6012.976,
+  "concurrent_100_seconds": 33.548,
+  "backed_up_requests": 104
+}
