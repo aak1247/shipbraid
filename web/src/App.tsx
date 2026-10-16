@@ -1,6 +1,7 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type FormEvent } from "react";
 import { ApiError, createApiClient, describeApiError } from "./api";
 import { Icon } from "./Icon";
+import { LogFeed } from "./LogFeed";
 import {
   eventLabel,
   formatDate,
@@ -73,9 +74,6 @@ function parseSelection(value: string | null): Selection {
   return { type, id };
 }
 
-function selectionKey(selection: Selection): string | null {
-  return selection ? `${selection.type}:${selection.id}` : null;
-}
 
 function mergeBySequence<T extends { sequence: number }>(current: T[], incoming: T[], cap: number): T[] {
   if (incoming.length === 0) return current;
@@ -461,6 +459,7 @@ function App() {
       const thisController = new AbortController();
       controller = thisController;
       const signal = thisController.signal;
+      let catchUpLogs = false;
       try {
         const detail = selection.type === "request"
           ? await api.getRequest(selection.id, signal)
@@ -513,12 +512,14 @@ function App() {
         setEvents(eventRecords);
 
         if (nextLogs) {
+          const previousLogCursor = currentLogCursor;
           const cursorFromPayload = Number.isFinite(nextLogs.next_cursor) ? nextLogs.next_cursor : currentLogCursor;
           if (nextLogs.items.length > 0) {
             currentLogCursor = Math.max(cursorFromPayload, nextLogs.items[nextLogs.items.length - 1]!.sequence);
           } else {
             currentLogCursor = Math.max(currentLogCursor, cursorFromPayload);
           }
+          catchUpLogs = nextLogs.items.length === 100 && currentLogCursor > previousLogCursor;
           logRecords = mergeBySequence(logRecords, nextLogs.items, 300);
           setLogs(logRecords);
           setLogCursor(currentLogCursor);
@@ -542,7 +543,7 @@ function App() {
         }
       } finally {
         if (alive && controller === thisController && document.visibilityState === "visible") {
-          timer = window.setTimeout(loadDetail, 2000);
+          timer = window.setTimeout(loadDetail, catchUpLogs ? 100 : 2000);
         }
       }
     };
@@ -613,6 +614,16 @@ function App() {
     setStatusFilter("all");
     const first = nextView === "requests" ? filteredRequests[0] : filteredRuns[0];
     setSelectedKey(first ? `${nextView === "requests" ? "request" : "run"}:${first.id}` : null);
+  }
+
+  const closeDetails = useCallback(() => setSelectedKey(null), []);
+
+  function inspectRelatedRecord(type: "request" | "run", id: string) {
+    setView(type === "run" ? "runs" : "requests");
+    setStatusFilter("all");
+    setPriorityFilter("all");
+    setSearch("");
+    selectRecord(type, id);
   }
 
   function selectRecord(type: "request" | "run", id: string) {
@@ -868,7 +879,9 @@ function App() {
           </div>
         </main>
 
-        <DetailPanel
+        {selection && <DetailPanel
+          key={selectedKey}
+          onClose={closeDetails}
           selection={selection}
           request={visibleRequest}
           run={visibleRun}
@@ -881,9 +894,9 @@ function App() {
           detailError={detailError}
           detailUpdated={detailUpdated}
           executorKind={selectedExecutorKind}
-          onSelectRequest={(id) => { setView("requests"); selectRecord("request", id); }}
-          onSelectRun={(id) => { setView("runs"); selectRecord("run", id); }}
-        />
+          onSelectRequest={(id) => inspectRelatedRecord("request", id)}
+          onSelectRun={(id) => inspectRelatedRecord("run", id)}
+        />}
       </div>
     </div>
   );
@@ -941,6 +954,7 @@ function RunTable({ rows, selectedId, onSelect }: { rows: DeliveryRun[]; selecte
 }
 
 function DetailPanel({
+  onClose,
   selection,
   request,
   run,
@@ -956,6 +970,7 @@ function DetailPanel({
   onSelectRequest,
   onSelectRun,
 }: {
+  onClose: () => void;
   selection: Selection;
   request: ReleaseRequest | null;
   run: DeliveryRun | null;
@@ -971,7 +986,9 @@ function DetailPanel({
   onSelectRequest: (id: string) => void;
   onSelectRun: (id: string) => void;
 }) {
-  const [tab, setTab] = useState<"timeline" | "logs">("timeline");
+  const [tab, setTab] = useState<"timeline" | "logs">(selection?.type === "run" ? "logs" : "timeline");
+  const closeButton = useRef<HTMLButtonElement>(null);
+  const opener = useRef<HTMLElement | null>(null);
   const selectedType = selection?.type ?? null;
   const isRequest = selectedType === "request";
   const currentRequest = isRequest ? request : null;
@@ -983,7 +1000,24 @@ function DetailPanel({
       ? <StatusBadge label={runLabel(currentRun.state)} tone={runTone(currentRun.state)} />
       : null;
 
-  useEffect(() => setTab("timeline"), [selectionKey(selection)]);
+  const dismiss = useCallback(() => {
+    onClose();
+    if (opener.current?.isConnected) opener.current.focus({ preventScroll: true });
+  }, [onClose]);
+
+  useEffect(() => {
+    const label = `查看${selectedType === "run" ? "执行" : "请求"} ${selection?.id}`;
+    opener.current = Array.from(document.querySelectorAll<HTMLButtonElement>("button[aria-label]"))
+      .find((button) => button.getAttribute("aria-label") === label)
+      ?? document.querySelector<HTMLButtonElement>('.view-switch button[aria-pressed="true"]')
+      ?? (document.activeElement instanceof HTMLElement ? document.activeElement : null);
+    closeButton.current?.focus({ preventScroll: true });
+    const onEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !event.defaultPrevented) { event.preventDefault(); dismiss(); }
+    };
+    document.addEventListener("keydown", onEscape);
+    return () => document.removeEventListener("keydown", onEscape);
+  }, [dismiss, selectedType, selection?.id]);
 
   async function copyId() {
     if (!id || !navigator.clipboard) return;
@@ -995,7 +1029,9 @@ function DetailPanel({
       <div className="detail-topline">
         <div><span className="detail-overline">记录详情</span><span className="detail-freshness">{detailUpdated ? `同步于 ${formatDate(detailUpdated.toISOString())}` : "等待读取"}</span></div>
         {detailLoading && <span className="mini-spinner" role="status" aria-label="正在更新详情" />}
+        <button ref={closeButton} className="icon-button detail-close" type="button" onClick={dismiss} aria-label="关闭记录详情" title="关闭 (Esc)"><Icon name="x" size={19} /></button>
       </div>
+      <div className={`detail-body${tab === "logs" ? " is-logs" : ""}`}>
       {!selection ? (
         <div className="detail-placeholder">
           <div className="placeholder-mark"><Icon name="arrow" size={18} /></div>
@@ -1016,6 +1052,8 @@ function DetailPanel({
           </div>
           {detailError && <div className="detail-error" role="status">{detailError}</div>}
           {selection && !request && !run && detailLoading && <div className="detail-skeleton"><span /><span /><span /></div>}
+          <details className="inspector-disclosure" open={tab === "timeline" || undefined}>
+            <summary>{isRequest ? "请求信息与关联执行" : "执行信息与验收"}<Icon name="chevron" size={15} /></summary>
           {currentRequest && (
             <RequestInspector
               request={currentRequest}
@@ -1033,6 +1071,7 @@ function DetailPanel({
               onSelectRun={onSelectRun}
             />
           )}
+          </details>
 
           <div className="detail-subnav" role="group" aria-label="详情内容">
             <button type="button" aria-pressed={tab === "timeline"} className={tab === "timeline" ? "is-selected" : ""} onClick={() => setTab("timeline")}>
@@ -1045,7 +1084,7 @@ function DetailPanel({
           {tab === "timeline" ? (
             <EventTimeline events={events} loading={detailLoading} />
           ) : (
-            <LogFeed logs={logs} cursor={logCursor} runId={currentRun?.id ?? linkedRun?.id ?? null} loading={detailLoading} executorKind={executorKind} />
+            <LogFeed key={currentRun?.id ?? linkedRun?.id ?? "pending"} logs={logs} cursor={logCursor} runId={currentRun?.id ?? linkedRun?.id ?? null} loading={detailLoading} executorKind={executorKind} />
           )}
           <div className="detail-footline">
             <span><Icon name="lock" size={13} />日志来源：{executorKind === "scripted" ? "模拟执行器" : executorKind === "hooks" ? "Hooks 执行器" : "当前通道执行器"}</span>
@@ -1053,6 +1092,7 @@ function DetailPanel({
           </div>
         </>
       )}
+      </div>
     </aside>
   );
 }
@@ -1199,31 +1239,6 @@ function EventTimeline({ events, loading }: { events: AuditEvent[]; loading: boo
           <p>{event.message}</p><small>序号 {event.sequence}{event.run_id ? ` · 执行 ${shortId(event.run_id)}` : ""}{event.request_id ? ` · 请求 ${shortId(event.request_id)}` : ""}</small></div>
       </li>)}
     </ol>
-  );
-}
-
-function LogFeed({ logs, cursor, runId, loading, executorKind }: { logs: ExecutorLog[]; cursor: number; runId: string | null; loading: boolean; executorKind: Lane["executor_kind"] | null }) {
-  const executorLabel = executorKind === "scripted" ? "模拟执行器" : executorKind === "hooks" ? "Hooks 执行器" : "当前通道执行器";
-  return (
-    <section className="log-section" aria-label="执行日志">
-      <div className="log-meta">
-        <span>{runId ? `执行 ${shortId(runId)}` : "当前无关联执行"}</span>
-        <span>{runId ? `游标 ${cursor}` : "—"}</span>
-      </div>
-      {loading && logs.length === 0 ? <div className="feed-loading"><span /><span /><span /></div> : !runId ? (
-        <div className="feed-empty"><span className="empty-line" /><p>此请求尚未关联执行。</p><small>执行日志只属于具体 run。</small></div>
-      ) : logs.length === 0 ? (
-        <div className="feed-empty"><span className="empty-line" /><p>此执行当前没有已读取日志。</p><small>{executorKind === "scripted" ? "日志由模拟 ScriptedExecutor 提供。" : `${executorLabel}尚未返回日志。`}</small></div>
-      ) : (
-        <ol className="log-list" aria-label="执行器日志">
-          {logs.map((log) => <li key={log.sequence} className={`log-level-${log.level.toLowerCase()}`}>
-            <time dateTime={log.timestamp}>{formatDate(log.timestamp)}</time><span className="log-sequence">{String(log.sequence).padStart(4, "0")}</span>
-            <span className="log-level">{log.level.toUpperCase()}</span><p>{log.message}</p>
-          </li>)}
-        </ol>
-      )}
-      <div className="log-cursor-note"><span className="live-tick" />每次读取最多 100 条 · 页面可见时自动续读</div>
-    </section>
   );
 }
 

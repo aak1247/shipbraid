@@ -135,9 +135,9 @@ The palette uses cool, low-chroma paper and graphite neutrals with a muted green
 
 ## Layout
 
-Above 1320px, the app uses a narrow lane rail, a flexible ledger, and a record inspector. Project and environment filters sit above the lane list; disabled lanes remain visible with a text label. The table remains the largest area; the inspector is a secondary reading column. Controls sit directly above the ledger, and status or service warnings appear in its flow. The spacing rhythm is based on 8px, with tighter 4px increments for dense labels and chips.
+The app uses a narrow lane rail and a flexible ledger. Selecting a record opens a non-modal inspector over the right side of the ledger without reflowing the table. Its width is up to 1080px; on intermediate screens it preserves the lane rail, and on phones it fills the viewport. The pinned inspector header exposes Close; Escape closes it and returns focus to the selected record. Background controls remain available on desktop.
 
-At 1320px and below, the inspector moves below the ledger while the lane rail remains visible. At 740px and below, the lane rail becomes a selector and the layout becomes one column. On phones, each semantic table row stacks status, revision, priority, relationship, and time without page-level horizontal scrolling. Filters wrap and remain touch sized.
+Execution records open on logs. Context, receipts and related requests remain accessible in a disclosure above the feed, while the timeline remains a separate view. The log viewport consumes the available inspector height and scrolls independently. Short windows allow the inspector body to scroll so controls remain reachable. On phones, each semantic ledger row retains its stacked arrangement without page-level horizontal scrolling.
 
 ## Elevation & Depth
 
@@ -172,7 +172,7 @@ The form language is softly squared: compact controls use 4–6px corners, panel
 - **Detail sections:** Use headings and thin separators rather than nested cards. Related records are explicit links, while receipts expose source revision, observation time, digests, and the verification report.
 
 ### Live feeds
-- **Event timeline and executor logs:** Show bounded records with timestamps and sequence numbers. Keep freshness and cursor context visible, and avoid streaming text animation. The ledger states `最近 200 条 · 筛选当前列表`; filters apply to the list currently returned to the page.
+- **Event timeline and executor logs:** Show bounded records with timestamps and sequence numbers. Logs use a graphite-green terminal surface, compact monospace rows, level text/color, and an independently scrollable viewport. Tail follows appended records by default; scrolling up or pressing Pause freezes the visible window while polling continues. Resume / Back to bottom displays the latest rolling window. A wrap toggle preserves long lines on desktop and defaults on for phones. Keep freshness and cursor context visible, never animate streamed text or announce every line to screen readers. The ledger states `最近 200 条 · 筛选当前列表`; filters apply to the list currently returned to the page.
 - **Executor labels:** Identify the executor for the selected lane. Label ScriptedExecutor lanes and synthetic receipt headings and outcomes as simulated, and keep each report tied to its source run.
 
 ## Do's and Don'ts
