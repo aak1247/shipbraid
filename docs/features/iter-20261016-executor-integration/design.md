@@ -38,12 +38,12 @@ hooks 调用 dispatch 前先事务提交非抢占 Deploying 区间；dispatch �
 
 AutoTask 桥接器放在 auto-deliver 项目 integration 目录：dispatch 使用 deterministic run/generation 的 systemd user unit；任务用冻结 SHA 调用 AutoTask 现有 deploy-local；单元结果和任务证明保存在私有运行目录。verify 重新核对 deploy checkout SHA、backend/worker 实际 PID 的 executable hash 与构建产物、frontend 进程工作目录及健康端点，生成匹配目标回执。不把共享工作区 HEAD 或 HTTP 健康单独当版本证明。现有旧入口作为运维回退，新增 coordinated 入口使用 HTTP；不递归调用自己。
 
-Dashboard 静态生产包由同一个 Axum 服务提供，API 同源且继续 bearer 鉴权；令牌文件位于仓库外 mode0600。配置只引用其环境变量名。服务用用户 systemd 常驻，绑定开发主机 server1 的 0.0.0.0:8787（同源 UI/API，API bearer 鉴权）；不创建公网 DNS/Ingress。
+Dashboard 静态生产包由同一个 Axum 服务提供，API 同源且继续 bearer 鉴权；令牌文件位于仓库外 mode0600。配置只引用其环境变量名。服务用用户 systemd 常驻，绑定开发主机 server1 的 127.0.0.1:8787（同源 UI/API，API bearer 鉴权；远程用 SSH 转发或已配置的 HTTPS 入口）；不创建公网 DNS/Ingress。
 
 ### 本机开发目标合同
 - lane `autotask-dev`，project `autotask`，environment `dev`，components `["app"]`；prod 示例 disabled 且无生产命令/凭据。
 - 固定共享源码 `/home/yahui/repos/autotask`，受信 bare mirror 位于 `~/.local/share/auto-deliver/mirrors/autotask.git`，发布线 `refs/heads/vibe`；部署 checkout `/home/yahui/repos/autotask-head`，只允许 frozen SHA，无镜像容器发布。
-- 原始执行脚本 `/home/yahui/repos/autotask/scripts/deploy-local.sh <full-sha>`；既有脚本锁保持生效。桥接器拒绝脏部署 checkout（不触发 WIP 自动清理）。
+- 执行脚本从受信 AutoTask 已提交对象导出到不可变协调器 release，记录来源 commit 与脚本 SHA256，再以该固定脚本 `<full-sha>` 执行；既有脚本锁保持生效。在既有锁内额外拒绝非快进历史替换；桥接器拒绝包含未跟踪源码的脏部署 checkout（不触发 WIP 自动清理），强制重建 backend/worker 并覆盖跳过构建的环境变量。
 - 服务 `autotask-backend.service` 对应 `server/bin/autotask`；`autotask-worker.service` 对应 `packages/worker-rust/target/debug/autotask-worker`；`autotask-frontend.service` 主进程 cwd 为部署 checkout。
 - 健康：`http://127.0.0.1:8011/live`、`http://127.0.0.1:8011/ready`、`http://127.0.0.1:8012/`。receipt.source_revision=冻结 SHA；component_digests.app=源码树+实际 backend/worker 哈希+前端进程身份的证据摘要；profile_digest=被冻结的有效执行配置；run_id/generation/executor_ref、观察 UTC 和独立验证报告必须匹配。
 - 常驻协调器 `auto-deliver.service`，端口8787；配置/令牌 `~/.config/auto-deliver/`，数据库/运行证据 `~/.local/share/auto-deliver/`，发布二进制及 UI 使用独立不可变 release 目录。
@@ -58,7 +58,7 @@ Dashboard 静态生产包由同一个 Axum 服务提供，API 同源且继续 be
 真实临时进程验证 command/script；本地 HTTP fixture 验证 webhook 鉴权、响应丢失/错误、日志与 verify；三传输均需状态/证据 fencing、非零退出和超时不误报成功。多环境测试验证互不共享、选择歧义失败，以及只授权开发 lane 的令牌不能读取或提交上线 lane。回归 M1 进程测试；Rust fmt/clippy/test/build，前端 typecheck/test/build。最终使用常驻服务提交并等待一次 AutoTask 本机开发真实发布，再查询回执、服务健康和 Dashboard；不以 fixture 替代该验收。
 
 ## 11. Rollout Plan
-先完成代码、配置样例与隔离测试；安装常驻协调器但不自动触发任务；提交/push 两仓库代码，从固定本地仓库更新受信 Git bare mirror 的 refs/heads/vibe，冻结该线上具体完整 SHA，发起该 SHA 的开发请求，验证所有目标服务及回执。生产只保留禁用配置示例。回退停用提交包装器并 drain 协调器，已运行任务由 systemd 独立完成/核对。
+先完成代码、配置样例与隔离测试；安装常驻协调器但不自动触发任务；提交/push 两仓库代码，首次从开发环境实际部署的已提交版本初始化受信 Git bare mirror 的 refs/heads/vibe；后续仅从固定本地仓库快进更新，冻结该线上具体完整 SHA，发起该 SHA 的开发请求，验证所有目标服务及回执。生产只保留禁用配置示例。回退停用提交包装器并 drain 协调器，已运行任务由 systemd 独立完成/核对。
 
 ## 12. Open Questions
 Q-101 首个目标已由用户选择本机开发环境；生产配置只作禁用示例。Q-102 webhook 接收端由部署管理员提供，本次用本地 fixture 验证协议，AutoTask 首次使用脚本适配器。

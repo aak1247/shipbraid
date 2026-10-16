@@ -4,9 +4,9 @@ Rust 发布请求协调器，附带 React + TypeScript + Tailwind Dashboard。
 
 它管理的是“上线需求”：已有执行覆盖需求时共享结果；紧急版本可以安全替代尚可停止的普通执行，旧请求继续等待后继验收。执行被替代后保留 `superseded`，请求只有拿到匹配的验收证据才会 `satisfied`。
 
-当前 M1 使用 **ScriptedExecutor 模拟执行器**。阶段、取消确认、日志和验收均来自本地模拟账本，**不会调用真实构建、GitHub Actions 或生产部署**。真实 CI 适配器属于 M2。
+支持 **ScriptedExecutor 模拟执行器**和管理员配置的 **command / script / webhook 外部执行器**。真实任务通过独立监督器运行，观察与验收分开；首个集成为 AutoTask 本机开发环境，生产保持禁用。见 [执行器协议与常驻安装](docs/hooks.md)。
 
-## 本地运行
+## 本地模拟运行
 
 需要 Rust ≥ 1.94、Git、Node.js 24、pnpm 11。当前验证环境和结果见 [验收记录](docs/acceptance/m1.md)。
 
@@ -30,7 +30,7 @@ pnpm dev
 
 打开 `http://127.0.0.1:5187`，手动输入第一个终端的 `AUTO_DELIVER_TOKEN`。令牌只保存在当前页面内存中。Vite 将 API 请求代理到 `127.0.0.1:8787`；Dashboard 不内置凭据或示例状态。
 
-Dashboard 可查看通道、请求与实际执行、优先级、阶段、替代关系、审计时间线和游标日志。M1 为只读界面，提交和运维控制使用 API/CLI。
+Dashboard 可查看通道、请求与实际执行、优先级、阶段、替代关系、审计时间线和游标日志。Dashboard 为只读界面，提交和运维控制使用 API/CLI。
 
 ## 提交与等待
 
@@ -73,10 +73,11 @@ pnpm build
 
 单实例、单本地持久卷，SQLite WAL + FULL、启动独占锁；不使用 NFS。停止命令被接受不代表已经停止，未知状态继续占有通道，不能靠超时解锁。Dashboard 轮询不是调度事实源。
 
-数据库备份应使用 SQLite 在线备份 API；不要在活动 WAL 状态下只复制 `.db` 文件。首次真实 CI 接入必须验证执行器身份、取消停止证明、部署阶段准入和独立环境验收；模拟器通过不代表真实部署已验收。当前环境新鲜证据复用、可配置自动重试、公平策略、完整故障矩阵和阶段指标仍待补齐；性能验收结果见 [验收记录](docs/acceptance/m1.md)。具体实现覆盖与待验收项以 [执行计划](docs/execution-plan.md) 为准。
+数据库备份应使用 SQLite 在线备份 API；不要在活动 WAL 状态下只复制 `.db` 文件。外部 hook 首版整体不可抢占，必须独立验收；只有具备停止证明和阶段准入的执行器才能在后续启用安全抢占。模拟器通过不代表真实部署已验收。当前环境新鲜证据复用、可配置自动重试、公平策略、完整故障矩阵和阶段指标仍待补齐；性能验收结果见 [验收记录](docs/acceptance/m1.md)。具体实现覆盖与待验收项以 [执行计划](docs/execution-plan.md) 为准。
 
 ## 设计与实施
 
+- [外部执行器、环境配置与常驻部署](docs/hooks.md)
 - [设计文档](docs/design.md)
 - [执行计划与任务状态](docs/execution-plan.md)
 - [前后端实施契约](docs/implementation-contract.md)
