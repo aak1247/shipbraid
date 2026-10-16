@@ -59,7 +59,13 @@ def main():
         def do_POST(self):
             with guard:
                 state["calls"] += 1
-            self.rfile.read(int(self.headers.get("Content-Length", "0")))
+            body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+            with guard:
+                state["body"] = body
+                current_mode = state["mode"]
+            if current_mode == "parameters":
+                self.respond(202, {"id": request_id, "status": "waiting", "parameters": body.get("parameters")})
+                return
             # Ambiguous handoff: server consumed the request and lost its response.
             self.close_connection = True
 
@@ -125,6 +131,17 @@ def main():
         assert result.returncode == 1 and "private-credential-path" not in result.stdout
         assert json.loads(result.stdout)["error"]["code"] == "local_error"
         report["checks"].append("parameter/local errors stay structured and omit private inputs")
+
+        mode("parameters")
+        value = run("submit", "--lane", "fixture", "--revision", "a" * 40, "--components", "app",
+                    "--param", "database_backup=skip", "--param", "release_note=approved", expected=0)
+        assert value["parameters"] == {"database_backup": "skip", "release_note": "approved"}
+        assert state["body"]["parameters"] == value["parameters"]
+        mode("parameters")
+        value = run("submit", "--lane", "fixture", "--revision", "a" * 40, "--components", "app",
+                    "--param", "database_backup=skip", "--param", "database_backup=include")
+        assert value["error"]["code"] == "invalid_parameter" and state["calls"] == 0
+        report["checks"].append("generic parameters cross HTTP unchanged; duplicate keys fail before submission")
 
         mode("ambiguous_post")
         value = run("submit", "--lane", "fixture", "--revision", "a" * 40, "--components", "app", "--idempotency-key", "recover-the-same-intent")

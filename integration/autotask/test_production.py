@@ -54,6 +54,7 @@ class ProductionHookTests(unittest.TestCase):
                     'revision': self.revision,
                     'components': ['app', 'website', 'worker'],
                     'profile_digest': self.profile,
+                    'parameters': {'database_backup': 'include'},
                 },
             },
             'lane': {
@@ -77,6 +78,8 @@ class ProductionHookTests(unittest.TestCase):
         if core is None:
             core = {
                 'source_revision': self.revision,
+                'target_parameters': dict(self.target['parameters']),
+                'database_backup_policy': self.target['parameters']['database_backup'],
                 'components': {
                     'app': {'image_digest': 'sha256:' + '1' * 64},
                     'website': {'image_digest': 'sha256:' + '2' * 64},
@@ -181,6 +184,67 @@ class ProductionHookTests(unittest.TestCase):
         drifted['lane']['profile_digest'] = 'd' * 64
         with self.assertRaises(RuntimeError):
             production.context(drifted, self.args)
+
+    def test_database_backup_policy_is_required_and_rejects_extra_parameters(self):
+        invalid_parameters = (None, {}, {'database_backup': 'automatic'},
+            {'database_backup': 'include', 'skip': True})
+        for parameters in invalid_parameters:
+            with self.subTest(parameters=parameters):
+                malformed = copy.deepcopy(self.envelope)
+                if parameters is None:
+                    malformed['run']['target'].pop('parameters')
+                else:
+                    malformed['run']['target']['parameters'] = parameters
+                with patch.object(production, '_run') as start:
+                    with self.assertRaisesRegex(RuntimeError, 'database_backup'):
+                        production.hook(malformed, self.args)
+                start.assert_not_called()
+
+    def test_worker_selects_only_the_frozen_database_backup_flag(self):
+        for policy, expected_flag, forbidden_flag in (
+                ('include', '--include-db-backup', '--skip-db-backup'),
+                ('skip', '--skip-db-backup', '--include-db-backup')):
+            with self.subTest(policy=policy):
+                case_state = self.root / policy
+                case_args = SimpleNamespace(**vars(self.args))
+                case_args.state_dir = case_state
+                case_dir = case_state / self.run_id
+                case_dir.mkdir(parents=True)
+                request_path = case_dir / 'request.json'
+                envelope = copy.deepcopy(self.envelope)
+                envelope['run']['target']['parameters'] = {'database_backup': policy}
+                # A top-level caller field has no authority over the durable target.
+                envelope['database_backup'] = 'skip' if policy == 'include' else 'include'
+                bridge.atomic_json(request_path, envelope)
+                runner = case_dir / 'reviewed-runner'
+                release_script = runner / 'scripts' / 'release.sh'
+                release_script.parent.mkdir(parents=True)
+                release_script.write_text('#!/bin/bash\n')
+                command = SimpleNamespace(returncode=0)
+                proof = {'core': {
+                    'target_parameters': {'database_backup': policy},
+                    'database_backup_policy': policy,
+                }}
+                with patch.object(production.bridge, 'unit_state', return_value={
+                        'Id': self.unit, 'LoadState': 'loaded', 'InvocationID': 'job-invocation'}), \
+                        patch.object(production, '_worker_observation', return_value={
+                            'invocation_id': 'worker-before', 'main_pid': 1,
+                            'start_ticks': '1', 'executable_sha256': 'a' * 64}), \
+                        patch.object(production, 'validate_published_revision'), \
+                        patch.object(production, 'validate_pipeline_blobs', return_value={
+                            'scripts/release.sh': 'reviewed-blob'}), \
+                        patch.object(production, '_prepare_runner', return_value=runner), \
+                        patch.object(production, '_cleanup_runner'), \
+                        patch.object(production, 'capture_proof', return_value=proof), \
+                        patch.object(production.subprocess, 'run', return_value=command) as execute:
+                    self.assertEqual(production.worker(request_path, case_args), 0)
+
+                argv = execute.call_args.args[0]
+                self.assertIn(expected_flag, argv)
+                self.assertNotIn(forbidden_flag, argv)
+                result = production._read_json(case_dir / 'result.json')
+                self.assertEqual(result['target']['parameters'], {'database_backup': policy})
+                self.assertEqual(result['proof']['core']['database_backup_policy'], policy)
 
     def test_rejects_target_not_on_published_origin_vibe(self):
         with patch.object(production, '_git', side_effect=[self.revision, self.args.reviewed_release_commit]), \
@@ -357,6 +421,22 @@ class ProductionHookTests(unittest.TestCase):
         self.assertEqual(reply['status'], 'unknown')
         self.assertNotIn('receipt', reply)
 
+    def test_verify_rejects_saved_proof_with_different_backup_policy(self):
+        self.write_request()
+        self.write_success_result()
+        result_path = self.directory / 'result.json'
+        result = production._read_json(result_path)
+        result['proof']['core']['database_backup_policy'] = 'skip'
+        bridge.atomic_json(result_path, result)
+        with patch.object(production.bridge, 'unit_state', return_value=self.exited_job_state()), \
+                patch.object(production, 'validate_pipeline_blobs', return_value={
+                    'scripts/release.sh': 'reviewed-blob'}), \
+                patch.object(production, 'capture_proof') as capture:
+            reply = production.hook({**self.envelope, 'operation': 'verify'}, self.args)
+        self.assertEqual(reply['status'], 'unknown')
+        self.assertNotIn('receipt', reply)
+        capture.assert_not_called()
+
     def test_fresh_verification_returns_three_component_receipt(self):
         self.write_request()
         saved = self.write_success_result()
@@ -370,6 +450,9 @@ class ProductionHookTests(unittest.TestCase):
         self.assertEqual(receipt['source_revision'], self.revision)
         self.assertEqual(receipt['profile_digest'], self.profile)
         self.assertEqual(set(receipt['component_digests']), {'app', 'website', 'worker'})
+        report = json.loads(receipt['verification_report'])
+        self.assertEqual(report['database_backup_policy'], 'include')
+        self.assertEqual(report['target_parameters'], {'database_backup': 'include'})
         self.assertGreaterEqual(receipt['observed_at'], fresh['observed_at'])
         observe.assert_called_once_with(self.repository, self.target,
             saved['core']['components']['worker']['before'])

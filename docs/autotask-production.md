@@ -7,13 +7,13 @@ Shipbraid 的 `autotask-prod` 通道协调一次完整生产发布：内网 Kube
 在 AutoTask 仓库运行：
 
 ```bash
-pnpm release:prod
-pnpm deploy:prod <完整SHA> --urgent
-pnpm deploy:coordinated --environment prod --no-wait
+pnpm release:prod --param database_backup=skip
+pnpm deploy:prod <完整SHA> --urgent --param database_backup=include
+pnpm deploy:coordinated --environment prod --param database_backup=skip --no-wait
 pnpm deploy:coordinated --environment prod --request-id <request-id>
 ```
 
-默认目标是生产受信镜像中已发布的 `vibe` 提交。开发 WIP、未推送本地提交、请求中的命令、主机覆盖和跳过检查参数不进入生产执行。协调请求不能只发布三个组件的一部分。
+默认目标是生产受信镜像中已发布的 `vibe` 提交。开发 WIP、未推送本地提交、请求中的命令、主机覆盖和跳过检查参数不进入生产执行。协调请求不能只发布三个组件的一部分。生产项目声明 `database_backup` 为必填枚举参数，未提供或值非法时在入账前拒绝。参数被冻结到 run 信封，不同参数不会合并执行或复用对方的成功回执。
 
 生产令牌独立保存在主机的 `~/.config/auto-deliver/production-operator.token`；客户端也支持 `AUTO_DELIVER_PROD_TOKEN` / `AUTO_DELIVER_PROD_TOKEN_FILE`。开发令牌无生产 lane 权限，生产令牌也无开发 lane 权限。现有安装保留旧 unit 和目录名，避免另开协调器或丢失账本身份。凭据不提交到 Git。
 
@@ -28,10 +28,10 @@ Dashboard 使用原管理身份查看两个环境，地址为 `http://172.168.3.
 独立进程在自己的审查工具 worktree 中运行：
 
 ```text
-release.sh prod all --from-git --ref <完整SHA> --include-db-backup
+release.sh prod all --from-git --ref <完整SHA> (--include-db-backup | --skip-db-backup)
 ```
 
-核心发布脚本、传递调用及生产清单的 blob 必须与审查提交一致；漂移检查在独立 job 内完成，失败有持久结果和可核验的停止身份。应用源码由既有 release.sh 创建另一个干净 worktree 构建，不修改共享工作区 WIP。数据库备份、生产快照、CAS、静态资源保留与原上线校验全部保留；不自动回滚已完成的部分组件。
+核心发布脚本、传递调用及生产清单的 blob 必须与审查提交一致；漂移检查在独立 job 内完成，失败有持久结果和可核验的停止身份。应用源码由既有 release.sh 创建另一个干净 worktree 构建，不修改共享工作区 WIP。数据库是否备份由请求者必填的 `parameters.database_backup=include|skip` 决定，没有默认值或自动判断。生产快照、CAS、静态资源保留与原上线校验全部保留；不自动回滚已完成的部分组件。
 
 原始 direct 维护入口保留为 `pnpm release:prod:direct` / `pnpm deploy:prod:direct`。协调执行与这些入口共用 `/tmp/autotask-release-prod.lock`。使用 direct 前仍应 drain 并核对所有权，防止已有排队意图随后重复发布。锁等待超时不证明另一个发布停止。
 
@@ -48,3 +48,5 @@ observe 的 completed 不满足请求。verify 必须重新观察，并与本次
 生产接入验收使用 mock/隔离任务测试完整交接及验收协议，并只读检查真实集群、Worker、注册表和现有网站。接入过程不发布代码、不重启三套生产工作负载，也不将当前线上状态伪造成某个新请求的成功 receipt。
 
 本轮没有关闭原高并发性能目标。隔离复测 `50 requests/s × 60s` 的 3000 个请求全部入账，p95 约 8.8 秒，仍未达到 250ms；见 [负载记录](acceptance/production-load-20261017.json)。生产接入按人工触发的低频发布使用，不能据此宣称达到该吞吐量的延迟指标。
+
+通用参数声明、HTTP/CLI 格式与脚本读取方式见[项目请求参数](request-parameters.md)。
