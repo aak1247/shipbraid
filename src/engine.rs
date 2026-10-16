@@ -7,9 +7,10 @@ use uuid::Uuid;
 use crate::{
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, DeliveryRun,
-        DeploymentReceipt, DomainError, Event, ExecutorResult, Lane, Phase, Priority,
-        ReceiptResult, ReconcileIds, ReconcileOutcome, ReleaseRequest, RequestStatus, RunState,
-        State, SubmitInput, SubmitOutcome, Target, TargetAuthorization, UnknownResolution,
+        DeploymentReceipt, DomainError, Event, ExecutorResult, LOCAL_TENANT_ID, Lane, Phase,
+        Priority, ReceiptResult, ReconcileIds, ReconcileOutcome, ReleaseRequest, RequestStatus,
+        RunState, State, SubmitInput, SubmitOutcome, Target, TargetAuthorization,
+        UnknownResolution,
     },
     lineage::{CoverageContext, CoverageQuery, is_full_revision},
 };
@@ -54,6 +55,11 @@ impl Engine {
         mut lane: Lane,
         now: DateTime<Utc>,
     ) -> Result<(), DomainError> {
+        if lane.tenant_id != LOCAL_TENANT_ID {
+            return Err(DomainError::TargetNotAllowed(
+                "only the local tenant is supported".to_owned(),
+            ));
+        }
         if lane.id.trim().is_empty()
             || lane.project.trim().is_empty()
             || lane.environment.trim().is_empty()
@@ -136,6 +142,12 @@ impl Engine {
             .cloned()
             .ok_or_else(|| DomainError::LaneNotFound(input.lane_id.clone()))?;
 
+        if lane.tenant_id != LOCAL_TENANT_ID {
+            return Err(DomainError::TargetNotAllowed(
+                "only the local tenant is supported".to_owned(),
+            ));
+        }
+
         if input.principal.trim().is_empty()
             || input.idempotency_key.trim().is_empty()
             || input.request_hash.trim().is_empty()
@@ -171,6 +183,8 @@ impl Engine {
         validate_target(&lane, &input.target, &input.authorization)?;
 
         let mut request = ReleaseRequest {
+            tenant_id: lane.tenant_id.clone(),
+            context: input.context,
             id: input.id,
             lane_id: lane.id.clone(),
             principal: input.principal,
@@ -2197,6 +2211,7 @@ fn emit(
     let sequence = *next;
     *next += 1;
     state.events.push(Event {
+        actor: None,
         sequence,
         lane_id: lane_id.to_owned(),
         run_id,
@@ -2421,6 +2436,7 @@ mod tests {
 
     fn lane(id: &str) -> Lane {
         Lane {
+            tenant_id: crate::domain::default_local_tenant(),
             id: id.to_owned(),
             project: "project".to_owned(),
             environment: "test".to_owned(),
@@ -2486,6 +2502,7 @@ mod tests {
             .submit(
                 state,
                 SubmitInput {
+                    context: Default::default(),
                     id: ids(request_id),
                     principal: format!("caller-{request_id}"),
                     idempotency_key: format!("idem-{request_id}"),
@@ -2690,6 +2707,7 @@ mod tests {
             .submit(
                 &mut state,
                 SubmitInput {
+                    context: Default::default(),
                     id: ids(99),
                     principal: "caller-1".to_owned(),
                     idempotency_key: "idem-1".to_owned(),
@@ -2710,6 +2728,7 @@ mod tests {
         let conflict = engine.submit(
             &mut state,
             SubmitInput {
+                context: Default::default(),
                 id: ids(100),
                 principal: "caller-1".to_owned(),
                 idempotency_key: "idem-1".to_owned(),
@@ -2824,6 +2843,7 @@ mod tests {
             .submit(
                 &mut state,
                 SubmitInput {
+                    context: Default::default(),
                     id: later_id,
                     principal: "caller-2".to_owned(),
                     idempotency_key: "idem-2".to_owned(),
@@ -3328,6 +3348,7 @@ mod tests {
                 .submit(
                     &mut state,
                     SubmitInput {
+                        context: Default::default(),
                         id: urgent_request,
                         principal: format!("caller-{urgent_request}"),
                         idempotency_key: format!("idem-{urgent_request}"),

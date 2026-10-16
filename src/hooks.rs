@@ -343,6 +343,7 @@ mod tests {
         };
         let run_id = Uuid::new_v4();
         let lane = Lane {
+            tenant_id: crate::domain::default_local_tenant(),
             id: "dev".into(),
             project: "p".into(),
             environment: "dev".into(),

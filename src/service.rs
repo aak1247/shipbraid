@@ -23,8 +23,9 @@ use crate::{
     config::{Config, HookConfig, LaneExecutorConfig, ResolvedToken},
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, CoverageMode, DomainError,
-        ExecutorResult, Lane, Phase, Priority, ReconcileIds, RequestStatus, RunState, State,
-        SubmitInput, SubmitOutcome, Target, UnknownResolution,
+        ExecutorResult, LOCAL_TENANT_ID, Lane, Phase, Priority, ReconcileIds, ReleaseRequest,
+        RequestContext, RequestStatus, RunState, State, SubmitInput, SubmitOutcome, Target,
+        UnknownResolution,
     },
     engine::{Engine, EngineConfig},
     executor::{Executor, ScriptedExecutor},
@@ -34,9 +35,77 @@ use crate::{
 };
 
 const MAX_PENDING_REQUESTS_PER_LANE: usize = 1_000;
+const MAX_MANUAL_RETRIES: u32 = 3;
+
+#[derive(Clone)]
+pub(crate) struct RequestActor {
+    pub id: String,
+    pub lanes: Vec<String>,
+    pub projects: Vec<String>,
+    pub urgent: bool,
+    pub admin: bool,
+    pub executor: bool,
+}
+
+impl RequestActor {
+    pub fn lane_allowed(&self, lane: &Lane) -> bool {
+        self.admin || self.lanes.contains(&lane.id) || self.projects.contains(&lane.project)
+    }
+
+    fn operation_allowed(&self, request: &ReleaseRequest, state: &State, urgent: bool) -> bool {
+        self.request_allowed(request, state) && (!urgent || self.urgent || self.admin)
+    }
+
+    fn request_allowed(&self, request: &ReleaseRequest, state: &State) -> bool {
+        (!self.executor || self.admin)
+            && state
+                .lanes
+                .get(&request.lane_id)
+                .is_some_and(|lane| self.lane_allowed(lane))
+            && (self.admin
+                || request.principal == self.id
+                || request.context.collaborators.contains(&self.id))
+    }
+}
+
+pub(crate) fn request_allowed_actions(
+    actor: &RequestActor,
+    request: &ReleaseRequest,
+    state: &State,
+    now: chrono::DateTime<Utc>,
+) -> Vec<&'static str> {
+    if !actor.request_allowed(request, state) {
+        return Vec::new();
+    }
+    let mut actions = Vec::new();
+    if !request.status.is_terminal() {
+        actions.push("withdraw");
+        if request.priority == Priority::Normal && actor.operation_allowed(request, state, true) {
+            actions.push("raise_priority");
+        }
+    }
+    if request.status == RequestStatus::NeedsAttention
+        && request.deadline_at.is_none_or(|deadline| deadline > now)
+        && request.manual_retries_used < MAX_MANUAL_RETRIES
+        && actor.operation_allowed(request, state, request.priority == Priority::Urgent)
+    {
+        actions.push("retry");
+    }
+    actions
+}
+
+pub(crate) enum RequestMutation {
+    Withdraw,
+    Retry,
+    Priority(Priority, String),
+}
 
 #[derive(Debug, Error)]
 pub enum ServiceError {
+    #[error("the authenticated actor is not authorized for this operation")]
+    Forbidden,
+    #[error("invalid request context: {0}")]
+    InvalidRequestContext(String),
     #[error(transparent)]
     Domain(#[from] DomainError),
     #[error("persistent storage operation failed: {0}")]
@@ -106,7 +175,7 @@ impl Service {
             coalesce_window: ChronoDuration::milliseconds(
                 i64::try_from(config.coalesce_ms).unwrap_or(i64::MAX),
             ),
-            max_manual_retries: 3,
+            max_manual_retries: MAX_MANUAL_RETRIES,
         });
         let now = Utc::now();
         for lane_config in &config.lanes {
@@ -114,6 +183,7 @@ impl Service {
             let effective_profile_digest = config.effective_profile_digest(lane_config)?;
             let current = state.lanes.get(&lane_config.id);
             let mut lane = Lane {
+                tenant_id: LOCAL_TENANT_ID.to_owned(),
                 id: lane_config.id.clone(),
                 project: lane_config.project.clone(),
                 environment: lane_config.environment.clone(),
@@ -288,6 +358,40 @@ impl Service {
         deadline_at: Option<chrono::DateTime<Utc>>,
         reason: String,
     ) -> Result<SubmitOutcome, ServiceError> {
+        self.submit_with_context(
+            principal,
+            idempotency_key,
+            request_hash,
+            lane_id,
+            revision,
+            components,
+            coverage_mode,
+            priority,
+            deadline_at,
+            reason,
+            RequestContext::default(),
+        )
+        .await
+    }
+
+    #[allow(
+        clippy::too_many_arguments,
+        reason = "Immutable authenticated submission fields"
+    )]
+    pub async fn submit_with_context(
+        &self,
+        principal: String,
+        idempotency_key: String,
+        request_hash: String,
+        lane_id: String,
+        revision: String,
+        components: Vec<String>,
+        coverage_mode: CoverageMode,
+        priority: Priority,
+        deadline_at: Option<chrono::DateTime<Utc>>,
+        reason: String,
+        context: RequestContext,
+    ) -> Result<SubmitOutcome, ServiceError> {
         // Resolve Git ancestry before taking the serialized ledger writer.
         // Concurrent submissions can therefore do their read-only local Git
         // checks in parallel instead of holding up commits behind a child
@@ -331,6 +435,7 @@ impl Service {
             .get(&lane_id)
             .cloned()
             .ok_or_else(|| DomainError::LaneNotFound(lane_id.clone()))?;
+        self.validate_context(&context, &lane)?;
         // Config may have been reloaded while the proof was being computed.
         // A proof for an old lane snapshot must never authorize a new target.
         if preliminary_lane.id != lane.id
@@ -387,7 +492,8 @@ impl Service {
             &mut next,
             SubmitInput {
                 id: Uuid::new_v4(),
-                principal,
+                principal: principal.clone(),
+                context,
                 idempotency_key,
                 request_hash,
                 lane_id,
@@ -400,8 +506,75 @@ impl Service {
             Utc::now(),
             &coverage,
         )?;
+        for event in &mut next.events[previous.events.len()..] {
+            event.actor = Some(principal.clone());
+        }
         self.commit_publish(&previous, next).await?;
         Ok(result)
+    }
+
+    fn validate_context(&self, context: &RequestContext, lane: &Lane) -> Result<(), ServiceError> {
+        for value in [&context.task_id, &context.session_id]
+            .into_iter()
+            .flatten()
+        {
+            if value.trim().is_empty() || value.len() > 256 || value.chars().any(char::is_control) {
+                return Err(ServiceError::InvalidRequestContext("task_id/session_id must be nonempty, at most 256 bytes, and contain no control characters".into()));
+            }
+        }
+        if context.collaborators.len() > 16
+            || context.collaborators.iter().any(|id| {
+                !self.tokens.iter().any(|token| {
+                    token.id == *id
+                        && !token.executor
+                        && (token.admin
+                            || token.lanes.contains(&lane.id)
+                            || token.projects.contains(&lane.project))
+                })
+            })
+        {
+            return Err(ServiceError::InvalidRequestContext("collaborators must contain at most 16 configured non-executor principals authorized for this lane".into()));
+        }
+        Ok(())
+    }
+
+    pub(crate) async fn mutate_request(
+        &self,
+        request_id: Uuid,
+        actor: &RequestActor,
+        mutation: RequestMutation,
+    ) -> Result<(), ServiceError> {
+        self.transact(None, |engine, state, _| {
+            let request = state
+                .requests
+                .get(&request_id)
+                .cloned()
+                .ok_or(DomainError::RequestNotFound)?;
+            let requires_urgent =
+                matches!(&mutation, RequestMutation::Priority(Priority::Urgent, _))
+                    || (matches!(&mutation, RequestMutation::Retry)
+                        && request.priority == Priority::Urgent);
+            if !actor.operation_allowed(&request, state, requires_urgent) {
+                return Err(ServiceError::Forbidden);
+            }
+            let start = state.events.len();
+            let now = Utc::now();
+            match mutation {
+                // Engine requires the owner; only map after authenticating the actual actor.
+                RequestMutation::Withdraw => {
+                    engine.withdraw(state, request_id, &request.principal, now)?
+                }
+                RequestMutation::Retry => engine.retry(state, request_id, now)?,
+                RequestMutation::Priority(priority, reason) => {
+                    engine.set_priority(state, request_id, priority, reason, now)?
+                }
+            }
+            for event in &mut state.events[start..] {
+                event.actor = Some(actor.id.clone());
+            }
+            Ok(())
+        })
+        .await
     }
 
     pub async fn withdraw(&self, request_id: Uuid, principal: String) -> Result<(), ServiceError> {
@@ -2281,6 +2454,7 @@ print(json.dumps(reply))
                     SubmitInput {
                         id: Uuid::new_v4(),
                         principal: "test-admin".into(),
+                        context: RequestContext::default(),
                         idempotency_key: "test-submit".into(),
                         request_hash: "test-request-hash".into(),
                         lane_id: lane.id.clone(),
@@ -2316,6 +2490,85 @@ print(json.dumps(reply))
             })
             .await
             .unwrap()
+    }
+
+    #[tokio::test]
+    async fn retry_and_action_hints_enforce_urgent_lane_deadline_and_limit() {
+        let (_temp, service) = test_service().await;
+        create_pending_dispatch(&service).await;
+        let request_id = *service.snapshot().await.requests.keys().next().unwrap();
+        service
+            .transact(None, |_, state, _| {
+                let request = state.requests.get_mut(&request_id).unwrap();
+                request.status = RequestStatus::NeedsAttention;
+                request.priority = Priority::Urgent;
+                request.context.collaborators.insert("collaborator".into());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        let mut actor = RequestActor {
+            id: "collaborator".into(),
+            lanes: vec!["test-lane".into()],
+            projects: vec![],
+            urgent: false,
+            admin: false,
+            executor: false,
+        };
+        let snapshot = service.snapshot().await;
+        let request = &snapshot.requests[&request_id];
+        assert_eq!(
+            request_allowed_actions(&actor, request, &snapshot, Utc::now()),
+            vec!["withdraw"]
+        );
+        assert!(matches!(
+            service
+                .mutate_request(request_id, &actor, RequestMutation::Retry)
+                .await,
+            Err(ServiceError::Forbidden)
+        ));
+        actor.urgent = true;
+        actor.lanes.clear();
+        assert!(matches!(
+            service
+                .mutate_request(request_id, &actor, RequestMutation::Retry)
+                .await,
+            Err(ServiceError::Forbidden)
+        ));
+        actor.lanes.push("test-lane".into());
+        assert!(request_allowed_actions(&actor, request, &snapshot, Utc::now()).contains(&"retry"));
+        let mut limited = request.clone();
+        limited.manual_retries_used = MAX_MANUAL_RETRIES;
+        assert!(
+            !request_allowed_actions(&actor, &limited, &snapshot, Utc::now()).contains(&"retry")
+        );
+        let mut expired = request.clone();
+        expired.deadline_at = Some(Utc::now() - ChronoDuration::seconds(1));
+        assert!(
+            !request_allowed_actions(&actor, &expired, &snapshot, Utc::now()).contains(&"retry")
+        );
+        actor.executor = true;
+        assert!(request_allowed_actions(&actor, request, &snapshot, Utc::now()).is_empty());
+        actor.executor = false;
+        service
+            .mutate_request(request_id, &actor, RequestMutation::Retry)
+            .await
+            .unwrap();
+        let snapshot = service.snapshot().await;
+        assert_eq!(
+            snapshot.requests[&request_id].status,
+            RequestStatus::Waiting
+        );
+        assert_eq!(
+            snapshot.events.last().unwrap().actor.as_deref(),
+            Some("collaborator")
+        );
+        assert!(matches!(
+            service
+                .mutate_request(request_id, &actor, RequestMutation::Retry)
+                .await,
+            Err(ServiceError::Domain(DomainError::NotRetryable))
+        ));
     }
 
     #[test]

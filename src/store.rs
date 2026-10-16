@@ -9,7 +9,7 @@ use sqlx::{
     sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous},
 };
 
-use crate::domain::State;
+use crate::domain::{LOCAL_TENANT_ID, State};
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 // Opening a connection may include filesystem initialization under host load.
@@ -114,27 +114,27 @@ impl Store {
 
         object.insert(
             "lanes".into(),
-            self.read_map("SELECT id, entity_json FROM lanes ORDER BY id")
+            self.read_map("SELECT id, tenant_id, entity_json FROM lanes ORDER BY id")
                 .await?,
         );
         object.insert(
             "requests".into(),
-            self.read_map("SELECT id, entity_json FROM requests ORDER BY id")
+            self.read_map("SELECT id, tenant_id, entity_json FROM requests ORDER BY id")
                 .await?,
         );
         object.insert(
             "runs".into(),
-            self.read_map("SELECT id, entity_json FROM runs ORDER BY id")
+            self.read_map("SELECT id, tenant_id, entity_json FROM runs ORDER BY id")
                 .await?,
         );
         object.insert(
             "receipts".into(),
-            self.read_map("SELECT id, entity_json FROM receipts ORDER BY id")
+            self.read_map("SELECT id, tenant_id, entity_json FROM receipts ORDER BY id")
                 .await?,
         );
         object.insert(
             "commands".into(),
-            self.read_map("SELECT id, entity_json FROM commands ORDER BY id")
+            self.read_map("SELECT id, tenant_id, entity_json FROM commands ORDER BY id")
                 .await?,
         );
         object.insert("events".into(), self.read_events().await?);
@@ -157,6 +157,19 @@ impl Store {
     /// and event edits are rejected because the M1 ledger is append-only.
     /// Callers publish `next` only after this transaction commits.
     pub async fn commit_transition(&self, previous: &State, next: &State) -> anyhow::Result<()> {
+        for state in [previous, next] {
+            if state
+                .lanes
+                .values()
+                .any(|lane| lane.tenant_id != LOCAL_TENANT_ID)
+                || state
+                    .requests
+                    .values()
+                    .any(|request| request.tenant_id != LOCAL_TENANT_ID)
+            {
+                bail!("only the local tenant is supported");
+            }
+        }
         // Compare typed rows first. A normal transition usually changes only
         // a handful of records, so avoid serializing the entire event/entity
         // history just to discover those changes.
@@ -238,9 +251,9 @@ impl Store {
             let entity = encode(value)?;
             let request_id = string_field(value, "id").unwrap_or(id.as_str());
             sqlx::query(
-                "INSERT INTO requests (id, lane_id, principal, idempotency_key, request_hash, status, current_run_id, satisfied_by_run, waiting_reason, created_at, entity_json) \
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
-                 ON CONFLICT(id) DO UPDATE SET lane_id=excluded.lane_id, principal=excluded.principal, idempotency_key=excluded.idempotency_key, request_hash=excluded.request_hash, status=excluded.status, current_run_id=excluded.current_run_id, satisfied_by_run=excluded.satisfied_by_run, waiting_reason=excluded.waiting_reason, entity_json=excluded.entity_json \
+                "INSERT INTO requests (id, lane_id, principal, idempotency_key, request_hash, status, current_run_id, satisfied_by_run, waiting_reason, created_at, entity_json, task_id) \
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+                 ON CONFLICT(id) DO UPDATE SET lane_id=excluded.lane_id, principal=excluded.principal, idempotency_key=excluded.idempotency_key, request_hash=excluded.request_hash, status=excluded.status, current_run_id=excluded.current_run_id, satisfied_by_run=excluded.satisfied_by_run, waiting_reason=excluded.waiting_reason, entity_json=excluded.entity_json, task_id=excluded.task_id \
                  WHERE requests.entity_json <> excluded.entity_json",
             )
             .bind(request_id)
@@ -254,6 +267,7 @@ impl Store {
             .bind(optional_string_field(value, "waiting_reason"))
             .bind(string_field(value, "created_at").unwrap_or_default())
             .bind(entity)
+            .bind(value.get("context").and_then(|context| string_field(context, "task_id")))
             .execute(&mut *tx)
             .await?;
         }
@@ -333,21 +347,28 @@ impl Store {
         let rows = sqlx::query(query).fetch_all(&self.pool).await?;
         let mut entities = Map::new();
         for row in rows {
+            let tenant: String = row.try_get("tenant_id")?;
             let id: String = row.try_get("id")?;
             let value: String = row.try_get("entity_json")?;
-            entities.insert(id, serde_json::from_str(&value)?);
+            let value = serde_json::from_str(&value)?;
+            validate_stored_tenant(&tenant, &value)?;
+            entities.insert(id, value);
         }
         Ok(Value::Object(entities))
     }
 
     async fn read_events(&self) -> anyhow::Result<Value> {
-        let rows = sqlx::query("SELECT entity_json FROM events ORDER BY lane_id, sequence")
-            .fetch_all(&self.pool)
-            .await?;
+        let rows =
+            sqlx::query("SELECT tenant_id, entity_json FROM events ORDER BY lane_id, sequence")
+                .fetch_all(&self.pool)
+                .await?;
         let mut events = Vec::with_capacity(rows.len());
         for row in rows {
+            let tenant: String = row.try_get("tenant_id")?;
             let value: String = row.try_get("entity_json")?;
-            events.push(serde_json::from_str(&value)?);
+            let value = serde_json::from_str(&value)?;
+            validate_stored_tenant(&tenant, &value)?;
+            events.push(value);
         }
         Ok(Value::Array(events))
     }
@@ -369,6 +390,17 @@ impl Store {
         }
         Ok(Value::Object(sequences))
     }
+}
+
+fn validate_stored_tenant(column: &str, entity: &Value) -> anyhow::Result<()> {
+    if column != LOCAL_TENANT_ID
+        || entity
+            .get("tenant_id")
+            .is_some_and(|tenant| tenant.as_str() != Some(LOCAL_TENANT_ID))
+    {
+        bail!("persistent state contains an unsupported tenant");
+    }
+    Ok(())
 }
 
 fn sqlite_version_tuple(version: &str) -> Option<(u64, u64, u64)> {
@@ -466,8 +498,8 @@ mod tests {
     use super::*;
     use crate::{
         domain::{
-            CoverageMode, Lane, LineageRelation, Priority, State, SubmitInput, Target,
-            TargetAuthorization,
+            CoverageMode, Lane, LineageRelation, Priority, RequestContext, State, SubmitInput,
+            Target, TargetAuthorization,
         },
         engine::Engine,
         lineage::CoverageContext,
@@ -475,6 +507,7 @@ mod tests {
 
     fn lane() -> Lane {
         Lane {
+            tenant_id: crate::domain::default_local_tenant(),
             id: "test".into(),
             project: "project".into(),
             environment: "test".into(),
@@ -497,6 +530,7 @@ mod tests {
 
     fn submit(revision: &str, hash: &str) -> SubmitInput {
         SubmitInput {
+            context: Default::default(),
             id: Uuid::new_v4(),
             principal: "operator".into(),
             idempotency_key: "key-1".into(),
@@ -592,5 +626,226 @@ mod tests {
         assert!(restored.draining);
         assert_eq!(restored.events.last().map(|event| event.sequence), Some(3));
         assert!(reopened.pragma_status().await.unwrap().wal);
+    }
+
+    #[tokio::test]
+    async fn request_context_and_actor_survive_restart_and_replay_keeps_creation_session() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("context.db");
+        let store = Store::open(&database).await.unwrap();
+        let empty = State::default();
+        let mut state = empty.clone();
+        let engine = Engine::default();
+        engine
+            .register_lane(&mut state, lane(), Utc::now())
+            .unwrap();
+        let revision = "a".repeat(40);
+        let mut input = submit(&revision, "context-hash");
+        input.context = RequestContext {
+            task_id: Some("release-task-42".into()),
+            session_id: Some("original-session".into()),
+            collaborators: BTreeSet::from(["agent-b".into(), "agent-c".into()]),
+        };
+        let outcome = engine
+            .submit(
+                &mut state,
+                input.clone(),
+                Utc::now(),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        state.events.last_mut().unwrap().actor = Some("operator".into());
+        store.commit_transition(&empty, &state).await.unwrap();
+        let task: String = sqlx::query_scalar("SELECT task_id FROM requests WHERE id = ?")
+            .bind(outcome.request_id.to_string())
+            .fetch_one(&store.pool)
+            .await
+            .unwrap();
+        assert_eq!(task, "release-task-42");
+        store.pool.close().await;
+
+        let reopened = Store::open(&database).await.unwrap();
+        let mut restored = reopened.load_state().await.unwrap();
+        assert_eq!(restored, state);
+        input.id = Uuid::new_v4();
+        input.context.session_id = Some("replacement-session".into());
+        let replay = engine
+            .submit(
+                &mut restored,
+                input,
+                Utc::now(),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert!(replay.reused);
+        assert_eq!(replay.request_id, outcome.request_id);
+        assert_eq!(restored, state);
+    }
+
+    #[tokio::test]
+    async fn unsupported_tenant_is_rejected_before_commit_and_during_load() {
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("tenant.db")).await.unwrap();
+        let empty = State::default();
+        let mut baseline = empty.clone();
+        let engine = Engine::default();
+        let mut foreign_lane = lane();
+        foreign_lane.tenant_id = "other-team".into();
+        assert!(
+            engine
+                .register_lane(&mut baseline, foreign_lane, Utc::now())
+                .is_err()
+        );
+        assert_eq!(baseline, empty);
+        engine
+            .register_lane(&mut baseline, lane(), Utc::now())
+            .unwrap();
+        let outcome = engine
+            .submit(
+                &mut baseline,
+                submit(&"a".repeat(40), "hash"),
+                Utc::now(),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        store.commit_transition(&empty, &baseline).await.unwrap();
+        let mut invalid = baseline.clone();
+        invalid
+            .requests
+            .get_mut(&outcome.request_id)
+            .unwrap()
+            .tenant_id = "other-team".into();
+        assert!(store.commit_transition(&baseline, &invalid).await.is_err());
+        assert_eq!(store.load_state().await.unwrap(), baseline);
+        assert!(
+            sqlx::query("UPDATE lanes SET tenant_id = 'other-team' WHERE id = 'test'")
+                .execute(&store.pool)
+                .await
+                .is_err()
+        );
+        sqlx::query("UPDATE requests SET entity_json = json_set(entity_json, '$.tenant_id', 'other-team') WHERE id = ?")
+            .bind(outcome.request_id.to_string()).execute(&store.pool).await.unwrap();
+        assert!(store.load_state().await.is_err());
+        let mut foreign_json = serde_json::to_value(lane()).unwrap();
+        foreign_json["tenant_id"] = json!("other-team");
+        assert!(serde_json::from_value::<Lane>(foreign_json).is_err());
+    }
+
+    #[tokio::test]
+    async fn v1_ledger_migrates_without_rewriting_old_json_hashes_or_events() {
+        let temp = tempfile::tempdir().unwrap();
+        let database = temp.path().join("v1.db");
+        let old_migrations = temp.path().join("old-migrations");
+        std::fs::create_dir(&old_migrations).unwrap();
+        std::fs::write(
+            old_migrations.join("0001_initial.sql"),
+            include_str!("../migrations/0001_initial.sql"),
+        )
+        .unwrap();
+        let old_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(
+                SqliteConnectOptions::new()
+                    .filename(&database)
+                    .create_if_missing(true)
+                    .foreign_keys(true),
+            )
+            .await
+            .unwrap();
+        Migrator::new(old_migrations.as_path())
+            .await
+            .unwrap()
+            .run(&old_pool)
+            .await
+            .unwrap();
+        let checksum: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+                .fetch_one(&old_pool)
+                .await
+                .unwrap();
+
+        let engine = Engine::default();
+        let mut expected = State::default();
+        let lane = lane();
+        engine
+            .register_lane(&mut expected, lane.clone(), Utc::now())
+            .unwrap();
+        let revision = "a".repeat(40);
+        let outcome = engine
+            .submit(
+                &mut expected,
+                submit(&revision, "unchanged-v1-hash"),
+                Utc::now(),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        let mut lane_json = serde_json::to_value(&lane).unwrap();
+        lane_json.as_object_mut().unwrap().remove("tenant_id");
+        sqlx::query("INSERT INTO lanes (id, project, environment, repository_id, release_line_id, release_ref, profile_digest, entity_json, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(&lane.id).bind(&lane.project).bind(&lane.environment).bind(&lane.repository_id)
+            .bind(&lane.release_line_id).bind(&lane.release_ref).bind(&lane.profile_digest)
+            .bind(lane_json.to_string()).bind(Utc::now().to_rfc3339()).execute(&old_pool).await.unwrap();
+        let request = &expected.requests[&outcome.request_id];
+        let mut request_json = serde_json::to_value(request).unwrap();
+        request_json.as_object_mut().unwrap().remove("tenant_id");
+        request_json.as_object_mut().unwrap().remove("context");
+        sqlx::query("INSERT INTO requests (id, lane_id, principal, idempotency_key, request_hash, status, created_at, entity_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(request.id.to_string()).bind(&request.lane_id).bind(&request.principal)
+            .bind(&request.idempotency_key).bind(&request.request_hash).bind("waiting")
+            .bind(request.created_at.to_rfc3339()).bind(request_json.to_string()).execute(&old_pool).await.unwrap();
+        let mut event_jsons = Vec::new();
+        for event in &expected.events {
+            let mut event_json = serde_json::to_value(event).unwrap();
+            event_json.as_object_mut().unwrap().remove("actor");
+            let event_json = event_json.to_string();
+            sqlx::query("INSERT INTO events (id, lane_id, sequence, run_id, request_id, timestamp, kind, message, entity_json) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)")
+                .bind(format!("{}:{}", event.lane_id, event.sequence)).bind(&event.lane_id)
+                .bind(i64::try_from(event.sequence).unwrap()).bind(event.run_id.map(|id| id.to_string()))
+                .bind(event.request_id.map(|id| id.to_string())).bind(event.timestamp.to_rfc3339())
+                .bind(&event.kind).bind(&event.message).bind(&event_json).execute(&old_pool).await.unwrap();
+            event_jsons.push(event_json);
+        }
+        old_pool.close().await;
+
+        let migrated = Store::open(&database).await.unwrap();
+        let mut restored = migrated.load_state().await.unwrap();
+        assert_eq!(restored, expected);
+        assert_eq!(
+            restored.requests[&outcome.request_id].context,
+            RequestContext::default()
+        );
+        let restored_checksum: Vec<u8> =
+            sqlx::query_scalar("SELECT checksum FROM _sqlx_migrations WHERE version = 1")
+                .fetch_one(&migrated.pool)
+                .await
+                .unwrap();
+        assert_eq!(restored_checksum, checksum);
+        let stored_events: Vec<String> =
+            sqlx::query_scalar("SELECT entity_json FROM events ORDER BY sequence")
+                .fetch_all(&migrated.pool)
+                .await
+                .unwrap();
+        assert_eq!(stored_events, event_jsons);
+        let replay = engine
+            .submit(
+                &mut restored,
+                submit(&revision, "unchanged-v1-hash"),
+                Utc::now(),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert!(replay.reused);
+        assert_eq!(replay.request_id, outcome.request_id);
+        assert_eq!(restored, expected);
+        assert!(
+            engine
+                .submit(
+                    &mut restored,
+                    submit(&revision, "changed-hash"),
+                    Utc::now(),
+                    &CoverageContext::default()
+                )
+                .is_err()
+        );
     }
 }

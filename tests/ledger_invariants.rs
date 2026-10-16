@@ -9,6 +9,7 @@ use uuid::Uuid;
 
 fn lane() -> Lane {
     Lane {
+        tenant_id: auto_deliver::domain::default_local_tenant(),
         id: "test".into(),
         project: "fixture".into(),
         environment: "test".into(),
@@ -46,6 +47,7 @@ async fn failed_commit_rolls_back_entity_updates_and_appended_audit_together() {
         .next_event_sequence
         .insert("test".into(), sequence + 1);
     invalid.events.push(Event {
+        actor: None,
         sequence,
         lane_id: "test".into(),
         run_id: None,

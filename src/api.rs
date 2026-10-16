@@ -3,7 +3,10 @@ use std::{collections::BTreeSet, sync::Arc};
 use axum::{
     Json, Router,
     body::Body,
-    extract::{Path, Query, State, rejection::JsonRejection},
+    extract::{
+        Path, Query, State,
+        rejection::{JsonRejection, QueryRejection},
+    },
     http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -18,10 +21,12 @@ use uuid::Uuid;
 use crate::{
     config::ResolvedToken,
     domain::{
-        CoverageMode, DeliveryRun, Event, Lane, Phase, Priority, ReleaseRequest,
-        State as DomainState,
+        CoverageMode, DeliveryRun, Event, LOCAL_TENANT_ID, Lane, Phase, Priority, ReleaseRequest,
+        RequestContext, RequestStatus, State as DomainState,
     },
-    service::{Service, ServiceError},
+    service::{
+        RequestActor as Actor, RequestMutation, Service, ServiceError, request_allowed_actions,
+    },
 };
 
 const MAX_REQUEST_BODY: usize = 16 * 1024;
@@ -32,16 +37,6 @@ const MAX_LIST_LIMIT: usize = 200;
 struct ApiState {
     service: Arc<Service>,
     tokens: Vec<ResolvedToken>,
-}
-
-#[derive(Clone)]
-struct Actor {
-    id: String,
-    lanes: Vec<String>,
-    projects: Vec<String>,
-    urgent: bool,
-    admin: bool,
-    executor: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -123,6 +118,13 @@ impl From<ServiceError> for ApiError {
     fn from(error: ServiceError) -> Self {
         use crate::domain::DomainError;
         match error {
+            ServiceError::Forbidden => Self::forbidden(),
+            ServiceError::InvalidRequestContext(message) => Self::new(
+                StatusCode::BAD_REQUEST,
+                "invalid_request_context",
+                message,
+                false,
+            ),
             ServiceError::Domain(DomainError::IdempotencyConflict) => Self::new(
                 StatusCode::CONFLICT,
                 "idempotency_conflict",
@@ -238,6 +240,18 @@ struct SubmitBody {
     deadline_at: Option<DateTime<Utc>>,
     #[serde(default)]
     reason: String,
+    #[serde(default)]
+    task_id: Option<String>,
+    #[serde(default)]
+    session_id: Option<String>,
+    #[serde(default, deserialize_with = "nullable_collaborators")]
+    collaborators: BTreeSet<String>,
+}
+
+fn nullable_collaborators<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<BTreeSet<String>, D::Error> {
+    Ok(Option::<BTreeSet<String>>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Deserialize)]
@@ -302,6 +316,10 @@ struct ListQuery {
     environment: Option<String>,
     after: Option<u64>,
     limit: Option<usize>,
+    task_id: Option<String>,
+    principal: Option<String>,
+    status: Option<RequestStatus>,
+    cursor: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -325,6 +343,10 @@ struct LogItem {
 
 #[derive(Debug, Serialize)]
 struct SystemView {
+    api_version: &'static str,
+    tenant_id: &'static str,
+    principal: String,
+    capabilities: Value,
     executor: String,
     draining: bool,
     version: &'static str,
@@ -435,6 +457,10 @@ async fn system(
     require_non_executor(&actor)?;
     let snapshot = state.service.snapshot().await;
     Ok(Json(SystemView {
+        api_version: "1",
+        tenant_id: LOCAL_TENANT_ID,
+        principal: actor.id.clone(),
+        capabilities: json!({"submit":true,"withdraw":true,"retry":true,"raise_priority":actor.urgent || actor.admin,"admin":actor.admin}),
         executor: state.service.executor_mix(),
         draining: snapshot.draining,
         version: env!("CARGO_PKG_VERSION"),
@@ -483,12 +509,78 @@ async fn get_lane(
     Ok(Json(lane_view(lane, state.service.executor_kind(&lane.id))))
 }
 
+#[derive(Debug, Serialize)]
+struct RequestPage {
+    items: Vec<Value>,
+    next_cursor: Option<String>,
+}
+
+#[derive(Debug, PartialEq, Eq, PartialOrd, Ord)]
+struct RequestCursor {
+    created_at: DateTime<Utc>,
+    lane_id: String,
+    creation_sequence: u64,
+    id: Uuid,
+}
+
+impl RequestCursor {
+    fn from_request(request: &ReleaseRequest) -> Self {
+        Self {
+            created_at: request.created_at,
+            lane_id: request.lane_id.clone(),
+            creation_sequence: request.creation_sequence,
+            id: request.id,
+        }
+    }
+    fn encode(&self) -> String {
+        // The append-only ledger retains the immutable ordering fields. A UUID
+        // anchor keeps every generated cursor bounded regardless of lane length.
+        format!("v1.{}", self.id.simple())
+    }
+    fn decode(
+        value: &str,
+        snapshot: &DomainState,
+        lane_filter: Option<&BTreeSet<String>>,
+    ) -> Result<Self, ApiError> {
+        let invalid = || {
+            ApiError::bad_request(
+                "invalid_cursor",
+                "cursor must be an unmodified request page cursor.",
+            )
+        };
+        if value.len() != 35 {
+            return Err(invalid());
+        }
+        let id = Uuid::parse_str(value.strip_prefix("v1.").ok_or_else(invalid)?)
+            .map_err(|_| invalid())?;
+        let request = snapshot
+            .requests
+            .get(&id)
+            .filter(|request| lane_filter.is_none_or(|lanes| lanes.contains(&request.lane_id)))
+            .ok_or_else(invalid)?;
+        Ok(Self::from_request(request))
+    }
+}
+
 async fn list_requests(
     State(state): State<ApiState>,
     axum::extract::Extension(actor): axum::extract::Extension<Actor>,
-    Query(query): Query<ListQuery>,
-) -> Result<Json<Items<Value>>, ApiError> {
+    query: Result<Query<ListQuery>, QueryRejection>,
+) -> Result<Json<RequestPage>, ApiError> {
     require_non_executor(&actor)?;
+    let Query(query) = query.map_err(|_| {
+        ApiError::bad_request(
+            "invalid_query",
+            "Invalid request filters, status, or limit.",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "invalid_limit",
+            "limit must be between 1 and 200.",
+        ));
+    }
     let snapshot = state.service.snapshot().await;
     let lane_filter = scoped_lane_filter(
         &actor,
@@ -497,6 +589,11 @@ async fn list_requests(
         query.environment.as_deref(),
         &snapshot,
     )?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|value| RequestCursor::decode(value, &snapshot, lane_filter.as_ref()))
+        .transpose()?;
     let mut requests: Vec<_> = snapshot
         .requests
         .values()
@@ -504,19 +601,38 @@ async fn list_requests(
             lane_filter
                 .as_ref()
                 .is_none_or(|lanes| lanes.contains(&request.lane_id))
+                && query
+                    .task_id
+                    .as_ref()
+                    .is_none_or(|task| request.context.task_id.as_ref() == Some(task))
+                && query
+                    .principal
+                    .as_ref()
+                    .is_none_or(|principal| request.principal == *principal)
+                && query
+                    .status
+                    .as_ref()
+                    .is_none_or(|status| request.status == *status)
+                && cursor
+                    .as_ref()
+                    .is_none_or(|cursor| RequestCursor::from_request(request) < *cursor)
         })
         .collect();
-    requests.sort_by(|left, right| {
-        right
-            .created_at
-            .cmp(&left.created_at)
-            .then_with(|| right.creation_sequence.cmp(&left.creation_sequence))
-    });
+    requests.sort_by_key(|request| std::cmp::Reverse(RequestCursor::from_request(request)));
+    let has_more = requests.len() > limit;
+    requests.truncate(limit);
+    let next_cursor = if has_more {
+        requests
+            .last()
+            .map(|request| RequestCursor::from_request(request).encode())
+    } else {
+        None
+    };
     let items = requests
         .into_iter()
-        .map(|request| request_view(request, &snapshot))
+        .map(|request| request_view(request, &snapshot, &actor))
         .collect();
-    Ok(Json(Items { items }))
+    Ok(Json(RequestPage { items, next_cursor }))
 }
 
 async fn get_request(
@@ -532,7 +648,7 @@ async fn get_request(
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
     require_lane_id(&actor, &request.lane_id, &snapshot)?;
-    Ok(Json(request_view(request, &snapshot)))
+    Ok(Json(request_view(request, &snapshot, &actor)))
 }
 
 async fn list_runs(
@@ -700,7 +816,7 @@ async fn create_request(
         })?;
     let mut components = body.components.clone();
     components.sort();
-    let body_value = json!({
+    let mut body_value = json!({
         "lane_id": &lane.id,
         "revision": &body.revision,
         "components": &components,
@@ -709,13 +825,17 @@ async fn create_request(
         "deadline_at": &body.deadline_at,
         "reason": &body.reason,
     });
+    // Preserve the exact old digest for empty context and session-only submissions.
+    if body.task_id.is_some() || !body.collaborators.is_empty() {
+        body_value["context"] = json!({"task_id":body.task_id,"collaborators":body.collaborators});
+    }
     let request_hash = hex::encode(Sha256::digest(
         serde_json::to_vec(&body_value).unwrap_or_default(),
     ));
     let outcome = state
         .service
-        .submit(
-            actor.id,
+        .submit_with_context(
+            actor.id.clone(),
             idempotency_key.to_owned(),
             request_hash,
             lane.id,
@@ -725,6 +845,11 @@ async fn create_request(
             body.priority,
             body.deadline_at,
             body.reason,
+            RequestContext {
+                task_id: body.task_id,
+                session_id: body.session_id,
+                collaborators: body.collaborators,
+            },
         )
         .await?;
     let snapshot = state.service.snapshot().await;
@@ -736,7 +861,7 @@ async fn create_request(
             true,
         )
     })?;
-    let mut view = request_view(request, &snapshot);
+    let mut view = request_view(request, &snapshot, &actor);
     if let Some(object) = view.as_object_mut() {
         object.insert("reused".into(), Value::Bool(outcome.reused));
         object.insert(
@@ -766,13 +891,16 @@ async fn withdraw_request(
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
     require_lane_id(&actor, &request.lane_id, &before)?;
-    state.service.withdraw(id, actor.id).await?;
+    state
+        .service
+        .mutate_request(id, &actor, RequestMutation::Withdraw)
+        .await?;
     let snapshot = state.service.snapshot().await;
     let request = snapshot
         .requests
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
-    Ok(Json(request_view(request, &snapshot)))
+    Ok(Json(request_view(request, &snapshot, &actor)))
 }
 
 async fn retry_request(
@@ -788,13 +916,16 @@ async fn retry_request(
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
     require_lane_id(&actor, &request.lane_id, &before)?;
-    state.service.retry(id).await?;
+    state
+        .service
+        .mutate_request(id, &actor, RequestMutation::Retry)
+        .await?;
     let snapshot = state.service.snapshot().await;
     let request = snapshot
         .requests
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
-    Ok(Json(request_view(request, &snapshot)))
+    Ok(Json(request_view(request, &snapshot, &actor)))
 }
 
 async fn set_priority(
@@ -823,14 +954,14 @@ async fn set_priority(
     };
     state
         .service
-        .set_priority(id, body.priority, reason)
+        .mutate_request(id, &actor, RequestMutation::Priority(body.priority, reason))
         .await?;
     let snapshot = state.service.snapshot().await;
     let request = snapshot
         .requests
         .get(&id)
         .ok_or_else(|| ApiError::missing("Request not found."))?;
-    Ok(Json(request_view(request, &snapshot)))
+    Ok(Json(request_view(request, &snapshot, &actor)))
 }
 
 async fn phase_grant(
@@ -1056,12 +1187,7 @@ fn normal_priority() -> Priority {
 }
 
 fn lane_allowed(actor: &Actor, lane: &Lane) -> bool {
-    actor.admin
-        || actor.lanes.iter().any(|id| id == &lane.id)
-        || actor
-            .projects
-            .iter()
-            .any(|project| project == &lane.project)
+    actor.lane_allowed(lane)
 }
 
 fn require_lane(actor: &Actor, lane: &Lane) -> Result<(), ApiError> {
@@ -1187,6 +1313,10 @@ fn require_admin(actor: &Actor) -> Result<(), ApiError> {
 fn lane_view(lane: &Lane, executor_kind: &str) -> Value {
     json!({
         "id": lane.id,
+        "tenant_id": lane.tenant_id,
+        "repository_id": lane.repository_id,
+        "components": lane.allowed_components,
+        "coverage_modes": if lane.descendant_coverage_enabled { vec!["exact", "descendant"] } else { vec!["exact"] },
         "project": lane.project,
         "environment": lane.environment,
         "executor_kind": executor_kind,
@@ -1203,12 +1333,19 @@ fn lane_view(lane: &Lane, executor_kind: &str) -> Value {
     })
 }
 
-fn request_view(request: &ReleaseRequest, snapshot: &DomainState) -> Value {
+fn request_view(request: &ReleaseRequest, snapshot: &DomainState, actor: &Actor) -> Value {
     let receipt = request
         .satisfied_by_receipt
         .and_then(|id| snapshot.receipts.get(&id));
     json!({
         "id": request.id,
+        "tenant_id": request.tenant_id,
+        "task_id": request.context.task_id,
+        "session_id": request.context.session_id,
+        "collaborators": request.context.collaborators,
+        "waiting_reason": request.waiting_reason,
+        "blocked_reason": snapshot.lanes.get(&request.lane_id).and_then(|lane| lane.blocked_reason.as_ref()),
+        "allowed_actions": request_allowed_actions(actor, request, snapshot, Utc::now()),
         "lane_id": request.lane_id,
         "revision": request.target.revision,
         "components": request.target.components,
@@ -1254,6 +1391,7 @@ fn run_view(run: &DeliveryRun, snapshot: &DomainState) -> Value {
 fn event_view(event: &Event) -> Value {
     json!({
         "sequence": event.sequence,
+        "actor": event.actor,
         "lane_id": event.lane_id,
         "run_id": event.run_id,
         "request_id": event.request_id,
@@ -1335,6 +1473,468 @@ mod tests {
         )
         .await
         .unwrap()
+    }
+
+    struct TeamFixture {
+        _temp: tempfile::TempDir,
+        service: Arc<Service>,
+        app: Router,
+        tokens: std::collections::BTreeMap<String, String>,
+        revision: String,
+    }
+
+    async fn team_fixture() -> TeamFixture {
+        team_fixture_with_lane("lane-one").await
+    }
+
+    async fn team_fixture_with_lane(lane_one_id: &str) -> TeamFixture {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        git(&work, &["init", "-b", "release"]);
+        git(&work, &["config", "user.name", "Team Fixture"]);
+        git(&work, &["config", "user.email", "fixture@example.invalid"]);
+        std::fs::write(work.join("app.txt"), "isolated fixture").unwrap();
+        git(&work, &["add", "app.txt"]);
+        git(&work, &["commit", "-m", "fixture"]);
+        let revision = git(&work, &["rev-parse", "HEAD"]);
+        let mirror = temp.path().join("source.git");
+        assert!(
+            Command::new("git")
+                .args(["clone", "--mirror"])
+                .arg(&work)
+                .arg(&mirror)
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .status()
+                .unwrap()
+                .success()
+        );
+        let mut tokens = std::collections::BTreeMap::new();
+        let mut env_names = Vec::new();
+        let configured = ["alice", "bob", "carol", "admin", "outside", "executor"]
+            .into_iter()
+            .map(|id| {
+                let secret = format!("isolated-{}-{}", id, Uuid::new_v4());
+                let name = format!("SHIPBRAID_API_TEST_{}", Uuid::new_v4().simple());
+                // Each test owns these unique environment names until Service resolves them.
+                unsafe {
+                    std::env::set_var(&name, &secret);
+                }
+                tokens.insert(id.to_owned(), secret);
+                env_names.push(name.clone());
+                TokenConfig {
+                    id: id.into(),
+                    token_env: name,
+                    lanes: vec![
+                        if id == "outside" {
+                            "lane-two"
+                        } else {
+                            lane_one_id
+                        }
+                        .into(),
+                    ],
+                    projects: vec![],
+                    urgent: id == "alice",
+                    admin: id == "admin",
+                    executor: id == "executor",
+                }
+            })
+            .collect();
+        let lane = |id: &str, project: &str| LaneConfig {
+            id: id.into(),
+            project: project.into(),
+            environment: "test".into(),
+            repository_id: "repo".into(),
+            repository_path: mirror.clone(),
+            release_ref: "refs/heads/release".into(),
+            profile_digest: "profile".into(),
+            components: vec!["app".into()],
+            allow_descendant: true,
+            allow_preemption: true,
+            enabled: true,
+            executor: LaneExecutorConfig::Scripted,
+        };
+        let service = Service::open(Config {
+            database_path: temp.path().join("ledger.db"),
+            tokens: configured,
+            lanes: vec![lane(lane_one_id, "lane-one"), lane("lane-two", "lane-two")],
+            ..Config::default()
+        })
+        .await
+        .unwrap();
+        for name in env_names {
+            unsafe {
+                std::env::remove_var(name);
+            }
+        }
+        let app = router(service.clone());
+        TeamFixture {
+            _temp: temp,
+            service,
+            app,
+            tokens,
+            revision,
+        }
+    }
+
+    impl TeamFixture {
+        fn body(&self) -> Value {
+            json!({"lane_id":"lane-one","revision":self.revision,"components":["app"],"coverage_mode":"exact","priority":"normal","reason":"fixture"})
+        }
+        async fn submit(&self, actor: &str, key: &str, body: Value) -> (StatusCode, Value) {
+            let response = self
+                .app
+                .clone()
+                .oneshot(
+                    Request::builder()
+                        .method("POST")
+                        .uri("/v1/requests")
+                        .header(AUTHORIZATION, format!("Bearer {}", self.tokens[actor]))
+                        .header("content-type", "application/json")
+                        .header("idempotency-key", key)
+                        .body(Body::from(body.to_string()))
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            response_json(response).await
+        }
+        async fn call(
+            &self,
+            actor: &str,
+            method: &str,
+            path: &str,
+            body: Option<Value>,
+        ) -> (StatusCode, Value) {
+            let body = body.map(|value| value.to_string());
+            response_json(
+                send(
+                    self.app.clone(),
+                    method,
+                    path,
+                    Some(&self.tokens[actor]),
+                    body.as_deref(),
+                )
+                .await,
+            )
+            .await
+        }
+    }
+
+    async fn response_json(response: Response) -> (StatusCode, Value) {
+        let status = response.status();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        (
+            status,
+            serde_json::from_slice(&bytes).unwrap_or_else(|_| {
+                panic!("non-JSON response: {}", String::from_utf8_lossy(&bytes))
+            }),
+        )
+    }
+
+    #[tokio::test]
+    async fn team_mutation_permissions_and_actor_audit_are_consistent() {
+        let f = team_fixture().await;
+        let mut body = f.body();
+        body["task_id"] = json!("task-17");
+        body["session_id"] = json!("creation-session");
+        body["collaborators"] = json!(["bob"]);
+        let (status, request) = f.submit("alice", "team", body).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(request["tenant_id"], "local");
+        assert_eq!(request["task_id"], "task-17");
+        let id = request["id"].as_str().unwrap();
+        let prefix = f.service.snapshot().await.events;
+        for action in ["withdraw", "retry", "priority"] {
+            let body = (action == "priority").then(|| json!({"priority":"urgent"}));
+            assert_eq!(
+                f.call(
+                    "carol",
+                    "POST",
+                    &format!("/v1/requests/{id}/{action}"),
+                    body
+                )
+                .await
+                .0,
+                StatusCode::FORBIDDEN
+            );
+        }
+        let (_, view) = f
+            .call("carol", "GET", &format!("/v1/requests/{id}"), None)
+            .await;
+        assert_eq!(view["allowed_actions"], json!([]));
+        let (_, view) = f
+            .call("bob", "GET", &format!("/v1/requests/{id}"), None)
+            .await;
+        assert_eq!(view["allowed_actions"], json!(["withdraw"]));
+        assert_eq!(
+            f.call(
+                "bob",
+                "POST",
+                &format!("/v1/requests/{id}/priority"),
+                Some(json!({"priority":"urgent"}))
+            )
+            .await
+            .0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            f.call(
+                "admin",
+                "POST",
+                &format!("/v1/requests/{id}/priority"),
+                Some(json!({"priority":"urgent"}))
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        assert_eq!(
+            f.call("bob", "POST", &format!("/v1/requests/{id}/withdraw"), None)
+                .await
+                .0,
+            StatusCode::OK
+        );
+        let snapshot = f.service.snapshot().await;
+        assert_eq!(&snapshot.events[..prefix.len()], &prefix);
+        let actor_for = |kind: &str| {
+            snapshot
+                .events
+                .iter()
+                .find(|event| event.kind == kind)
+                .unwrap()
+                .actor
+                .as_deref()
+        };
+        assert_eq!(actor_for("request_accepted"), Some("alice"));
+        assert_eq!(actor_for("request_priority_raised"), Some("admin"));
+        assert_eq!(actor_for("request_withdrawn"), Some("bob"));
+        for collaborator in ["outside", "executor", "unknown"] {
+            let mut body = f.body();
+            body["collaborators"] = json!([collaborator]);
+            assert_eq!(
+                f.submit("alice", collaborator, body).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        for field in ["tenant_id", "principal"] {
+            let mut body = f.body();
+            body[field] = json!("forged");
+            assert_eq!(
+                f.submit("alice", field, body).await.0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let mut body = f.body();
+        body["task_id"] = json!("   ");
+        assert_eq!(
+            f.submit("alice", "invalid-task", body).await.0,
+            StatusCode::BAD_REQUEST
+        );
+        let (_, own) = f.submit("alice", "owner", f.body()).await;
+        assert_eq!(
+            f.call(
+                "alice",
+                "POST",
+                &format!("/v1/requests/{}/withdraw", own["id"].as_str().unwrap()),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+        let (_, own) = f.submit("alice", "admin", f.body()).await;
+        assert_eq!(
+            f.call(
+                "admin",
+                "POST",
+                &format!("/v1/requests/{}/withdraw", own["id"].as_str().unwrap()),
+                None
+            )
+            .await
+            .0,
+            StatusCode::OK
+        );
+    }
+
+    #[tokio::test]
+    async fn context_hash_preserves_legacy_and_creation_session() {
+        let f = team_fixture().await;
+        let old = f.body();
+        let expected_hash = hex::encode(Sha256::digest(serde_json::to_vec(&json!({"lane_id":"lane-one","revision":f.revision,"components":["app"],"coverage_mode":"exact","priority":"normal","deadline_at":null,"reason":"fixture"})).unwrap()));
+        let (_, first) = f.submit("alice", "old", old.clone()).await;
+        let id = Uuid::parse_str(first["id"].as_str().unwrap()).unwrap();
+        assert_eq!(
+            f.service.snapshot().await.requests[&id].request_hash,
+            expected_hash
+        );
+        let mut session_only = old.clone();
+        session_only["session_id"] = json!("new-session");
+        session_only["task_id"] = Value::Null;
+        session_only["collaborators"] = Value::Null;
+        let (status, replay) = f.submit("alice", "old", session_only).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(replay["id"], first["id"]);
+        assert!(replay["session_id"].is_null());
+        let mut context = old.clone();
+        context["task_id"] = json!("task");
+        context["session_id"] = json!("first-session");
+        context["collaborators"] = json!(["bob", "carol", "bob"]);
+        let (_, first) = f.submit("alice", "context", context.clone()).await;
+        context["session_id"] = json!("other-session");
+        context["collaborators"] = json!(["carol", "bob"]);
+        let (status, replay) = f.submit("alice", "context", context.clone()).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert_eq!(replay["id"], first["id"]);
+        assert_eq!(replay["session_id"], "first-session");
+        context["task_id"] = json!("different-task");
+        assert_eq!(
+            f.submit("alice", "context", context).await.0,
+            StatusCode::CONFLICT
+        );
+    }
+
+    #[tokio::test]
+    async fn request_pagination_filters_and_discovery_support_agent_recovery() {
+        let f = team_fixture().await;
+        let mut original = Vec::new();
+        for n in 0..5 {
+            let mut body = f.body();
+            body["task_id"] = json!("recover");
+            let (_, view) = f.submit("alice", &format!("page-{n}"), body).await;
+            original.push(view["id"].clone());
+        }
+        let (status, first) = f
+            .call(
+                "alice",
+                "GET",
+                "/v1/requests?limit=2&task_id=recover&principal=alice&status=waiting",
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(first["items"].as_array().unwrap().len(), 2);
+        let mut body = f.body();
+        body["task_id"] = json!("recover");
+        let (_, inserted) = f.submit("alice", "newer", body).await;
+        let mut gathered = first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["id"].clone())
+            .collect::<Vec<_>>();
+        let mut cursor = first["next_cursor"].as_str().map(str::to_owned);
+        while let Some(anchor) = cursor {
+            let (status, page) = f
+                .call(
+                    "alice",
+                    "GET",
+                    &format!("/v1/requests?limit=2&task_id=recover&cursor={anchor}"),
+                    None,
+                )
+                .await;
+            assert_eq!(status, StatusCode::OK);
+            gathered.extend(
+                page["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|item| item["id"].clone()),
+            );
+            cursor = page["next_cursor"].as_str().map(str::to_owned);
+        }
+        original.reverse();
+        assert_eq!(gathered, original);
+        assert!(!gathered.contains(&inserted["id"]));
+        for query in [
+            "limit=0",
+            "limit=201",
+            "limit=no",
+            "status=no",
+            "cursor=bad",
+            "cursor=v1.7b7d",
+        ] {
+            assert_eq!(
+                f.call("alice", "GET", &format!("/v1/requests?{query}"), None)
+                    .await
+                    .0,
+                StatusCode::BAD_REQUEST
+            );
+        }
+        let (_, none) = f
+            .call("alice", "GET", "/v1/requests?principal=bob", None)
+            .await;
+        assert_eq!(none["items"], json!([]));
+        let (_, system) = f.call("bob", "GET", "/v1/system", None).await;
+        assert_eq!(system["api_version"], "1");
+        assert_eq!(system["principal"], "bob");
+        assert_eq!(system["capabilities"]["raise_priority"], false);
+        let (_, lane) = f.call("bob", "GET", "/v1/lanes/lane-one", None).await;
+        assert_eq!(lane["repository_id"], "repo");
+        assert_eq!(lane["components"], json!(["app"]));
+        assert!(lane.get("repository_path").is_none());
+        let (_, view) = f
+            .call(
+                "alice",
+                "GET",
+                &format!("/v1/requests/{}", inserted["id"].as_str().unwrap()),
+                None,
+            )
+            .await;
+        for field in ["waiting_reason", "blocked_reason", "allowed_actions"] {
+            assert!(view.get(field).is_some());
+        }
+    }
+
+    #[tokio::test]
+    async fn request_cursor_round_trips_long_lane_and_hides_inaccessible_anchors() {
+        let long_lane = "l".repeat(3_000);
+        let f = team_fixture_with_lane(&long_lane).await;
+        let mut ids = Vec::new();
+        for n in 0..3 {
+            let mut body = f.body();
+            body.as_object_mut().unwrap().remove("lane_id");
+            body["project"] = json!("lane-one");
+            body["environment"] = json!("test");
+            let (status, request) = f.submit("alice", &format!("long-{n}"), body).await;
+            assert_eq!(status, StatusCode::ACCEPTED);
+            ids.push(request["id"].clone());
+        }
+        let (status, first) = f.call("alice", "GET", "/v1/requests?limit=1", None).await;
+        assert_eq!(status, StatusCode::OK);
+        let cursor = first["next_cursor"].as_str().unwrap();
+        assert_eq!(cursor.len(), 35);
+        let (status, second) = f
+            .call(
+                "alice",
+                "GET",
+                &format!("/v1/requests?limit=1&cursor={cursor}"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(second["items"][0]["id"], ids[1]);
+        let (denied_status, denied) = f
+            .call(
+                "outside",
+                "GET",
+                &format!("/v1/requests?cursor={cursor}"),
+                None,
+            )
+            .await;
+        let (missing_status, missing) = f
+            .call(
+                "outside",
+                "GET",
+                &format!("/v1/requests?cursor=v1.{}", Uuid::new_v4().simple()),
+                None,
+            )
+            .await;
+        assert_eq!(denied_status, StatusCode::BAD_REQUEST);
+        assert_eq!(missing_status, denied_status);
+        assert_eq!(denied, missing);
+        assert_eq!(denied["code"], "invalid_cursor");
     }
 
     #[tokio::test]

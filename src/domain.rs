@@ -7,6 +7,33 @@ use uuid::Uuid;
 
 pub type Id = Uuid;
 
+pub const LOCAL_TENANT_ID: &str = "local";
+
+pub fn default_local_tenant() -> String {
+    LOCAL_TENANT_ID.to_owned()
+}
+
+fn deserialize_local_tenant<'de, D>(deserializer: D) -> Result<String, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let tenant = String::deserialize(deserializer)?;
+    if tenant != LOCAL_TENANT_ID {
+        return Err(serde::de::Error::custom(
+            "only the local tenant is supported",
+        ));
+    }
+    Ok(tenant)
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+pub struct RequestContext {
+    pub task_id: Option<String>,
+    pub session_id: Option<String>,
+    #[serde(default)]
+    pub collaborators: BTreeSet<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -102,6 +129,11 @@ pub struct Target {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Lane {
+    #[serde(
+        default = "default_local_tenant",
+        deserialize_with = "deserialize_local_tenant"
+    )]
+    pub tenant_id: String,
     pub id: String,
     pub project: String,
     pub environment: String,
@@ -123,6 +155,13 @@ pub struct Lane {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct ReleaseRequest {
+    #[serde(
+        default = "default_local_tenant",
+        deserialize_with = "deserialize_local_tenant"
+    )]
+    pub tenant_id: String,
+    #[serde(default)]
+    pub context: RequestContext,
     pub id: Id,
     pub lane_id: String,
     pub principal: String,
@@ -212,6 +251,8 @@ pub struct Command {
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 pub struct Event {
+    #[serde(default)]
+    pub actor: Option<String>,
     pub sequence: u64,
     pub lane_id: String,
     pub run_id: Option<Id>,
@@ -239,6 +280,7 @@ pub struct State {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SubmitInput {
+    pub context: RequestContext,
     pub id: Id,
     pub principal: String,
     pub idempotency_key: String,
