@@ -51,7 +51,7 @@ Shipbraid 独立于 AutoTask，具体构建与部署继续使用你配置的工�
 ### 1. 启动协调器
 
 ```bash
-git clone https://github.com/aak1247/auto-deliver.git shipbraid
+git clone https://github.com/aak1247/shipbraid.git shipbraid
 cd shipbraid
 cargo build --locked
 

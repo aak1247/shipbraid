@@ -42,7 +42,7 @@ shipbraid --json list lane
 
 `docs/acceptance/` 和已完成 feature 中的验收记录保留当时真实的 `auto-deliver` unit、二进制路径、GitHub CI URL 和命令，避免将历史证据改写成未执行过的新名称。这些记录不作为当前命令用法；当前入口见 README、[Agent 指南](agents.md)和[hooks 指南](hooks.md)。
 
-当前配置的 Git 远端仍是 `https://github.com/aak1247/auto-deliver.git`，因此 README 的 clone 地址保留真实托管地址，checkout 目录为 `shipbraid`。远端仓库本身及本地 checkout 目录未被此代码改名操作移动。
+2026-10-17，GitHub 仓库已改名为 [`aak1247/shipbraid`](https://github.com/aak1247/shipbraid)，本地 `origin` 和 README clone 地址统一为 `https://github.com/aak1247/shipbraid.git`。改名前后仓库 ID 均为 `1421990668`，默认分支仍为 `main`；旧 API 地址也解析到该相同仓库。此操作未移动本机 checkout 目录，历史 CI 链接与验收记录保留原地址。
 
 ## 本轮验证
 

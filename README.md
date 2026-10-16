@@ -51,7 +51,7 @@ Requires Rust **1.94+**, Git, and OpenSSL for the token-generation commands belo
 ### 1. Start the coordinator
 
 ```bash
-git clone https://github.com/aak1247/auto-deliver.git shipbraid
+git clone https://github.com/aak1247/shipbraid.git shipbraid
 cd shipbraid
 cargo build --locked
 
