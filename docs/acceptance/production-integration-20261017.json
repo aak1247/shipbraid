@@ -1,0 +1,131 @@
+{
+  "observed_at": "2026-10-16T18:14:39.294190+00:00",
+  "source_commit": "de5d94e06fcb11373406c7938e7d83f2ef19ada1",
+  "autotask_client_source": "dd4ca5fe8",
+  "reviewed_pipeline_commit": "8f65b10267c95cc5854d02375df70aa4fda0ce7e",
+  "scope": [
+    "internal prod/autotask",
+    "node166 autotask-worker-prod.service",
+    "internal prod/autotask-website"
+  ],
+  "production_mutations": 0,
+  "production_deployment_requests_submitted": 0,
+  "validation": {
+    "rust_unit_and_ledger_tests": 62,
+    "python_production_bridge_installer_tests": 44,
+    "autotask_client_http_tests": 8,
+    "backup_policy_tests": 6,
+    "fmt": "passed",
+    "clippy_all_targets_warnings_denied": "passed",
+    "release_build_locked": "passed",
+    "isolated_acceptance": [
+      "scripted coordinator",
+      "command/script/webhook",
+      "agent collaboration",
+      "CLI including generic parameter HTTP transport"
+    ]
+  },
+  "installation": {
+    "source_commit": "de5d94e06fcb11373406c7938e7d83f2ef19ada1",
+    "binary_sha256": "c16a2efa29d3d4071e986801ae433d1c86919b419e48cd828336b8ed93cfad2c",
+    "adapter_sha256": "deda044b2596be644ccd760e3a22c06b25720d358f726fe1f4d15af01e9a015b",
+    "schema": {
+      "database_backup": {
+        "required": true,
+        "allowed_values": [
+          "include",
+          "skip"
+        ]
+      }
+    },
+    "database_backup_has_no_default": true,
+    "development_config_unchanged": true,
+    "dashboard_dir_unchanged": true,
+    "real_deployments": 0
+  },
+  "live_api_checks": {
+    "production_lane_enabled": true,
+    "components": [
+      "app",
+      "website",
+      "worker"
+    ],
+    "required_parameters": {
+      "database_backup": {
+        "allowed_values": [
+          "include",
+          "skip"
+        ],
+        "required": true
+      }
+    },
+    "production_requests": 0,
+    "production_runs": 0,
+    "parameter_admission_checks": [
+      {
+        "parameters": null,
+        "http_status": 422,
+        "code": "target_not_allowed"
+      },
+      {
+        "parameters": {
+          "database_backup": "auto"
+        },
+        "http_status": 422,
+        "code": "target_not_allowed"
+      },
+      {
+        "parameters": {
+          "database_backup": "skip",
+          "command": "arbitrary"
+        },
+        "http_status": 422,
+        "code": "target_not_allowed"
+      },
+      {
+        "parameters": {
+          "database_backup": "include"
+        },
+        "http_status": 422,
+        "code": "lineage_unproven"
+      },
+      {
+        "parameters": {
+          "database_backup": "skip"
+        },
+        "http_status": 422,
+        "code": "lineage_unproven"
+      }
+    ],
+    "credential_scopes_isolated": true,
+    "loopback_and_lan_ready": true,
+    "sqlite_integrity": "ok"
+  },
+  "read_only_production_health": {
+    "workloads": {
+      "autotask": {
+        "generation": 237,
+        "image": "harbor.hive-intel.com/prod/autotask@sha256:63a67bcf4c1e6cb5a3c0ea8f59808e1e40ded5e6f7255e55d05dae83c16da3ea",
+        "ready_replicas": 2,
+        "desired_replicas": 2
+      },
+      "autotask-website": {
+        "generation": 53,
+        "image": "harbor.hive-intel.com/prod/autotask-website@sha256:7d27326ffa41e2bbc447dd1d1bf41a765fd12d639a04b2c7939cfb1bde614584",
+        "ready_replicas": 2,
+        "desired_replicas": 2
+      }
+    },
+    "app_pod_live_ready_checks": true,
+    "standalone_worker_active": true,
+    "standalone_worker_binary_sha256": "139ece2ca7d6460c6960dade266f323ec26971f6f30627d1dc41c8a61f68925d",
+    "website_ingress_sha256": "20a23c9703b929ebbb68ca4afd3881bf7f35cf67466349db4d0aa7b0d8b7a2a5",
+    "database_backup_host_preflight": "SSH key access, running postgres, writable backup path verified; no backup created"
+  },
+  "limits": [
+    "Integration is enabled; the first real three-component release has not been submitted.",
+    "Backup selection has no default and is required by the project schema.",
+    "50 requests/s sustained p95 target remains NOT PASSED; see production-load-20261017.json.",
+    "A supervisor/identity/child-process mismatch remains unknown and keeps ownership; no forced unlock."
+  ]
+}

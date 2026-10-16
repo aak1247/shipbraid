@@ -50,3 +50,5 @@ observe 的 completed 不满足请求。verify 必须重新观察，并与本次
 本轮没有关闭原高并发性能目标。隔离复测 `50 requests/s × 60s` 的 3000 个请求全部入账，p95 约 8.8 秒，仍未达到 250ms；见 [负载记录](acceptance/production-load-20261017.json)。生产接入按人工触发的低频发布使用，不能据此宣称达到该吞吐量的延迟指标。
 
 通用参数声明、HTTP/CLI 格式与脚本读取方式见[项目请求参数](request-parameters.md)。
+
+本机启用记录、必填参数拒绝用例与只读生产健康检查见[生产接入验收](acceptance/production-integration-20261017.json)。已启用生产 lane，尚未提交首个真实三组件发布。
