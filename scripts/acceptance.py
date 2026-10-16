@@ -193,6 +193,14 @@ components = ["app"]
             covered = submit(revisions[3], priority="urgent")
             assert get_request(covered["id"])["current_run_id"] == running
             assert request(f"/v1/runs/{running}")["effective_priority"] == "urgent"
+            run_before_unknown = request(f"/v1/runs/{running}")
+            request("/v1/executor-events", {"run_id":running,"generation":run_before_unknown["generation"],"event":"unknown","executor_ref":run_before_unknown["executor_ref"],"reason":"synthetic observation uncertainty"}, token=executor)
+            assert request("/v1/lanes/synthetic-test")["active_run_id"] == running
+            request("/v1/lanes/synthetic-test/resolve-unknown", {"action":"confirm_stopped","evidence":"human assertion only","reason":"must not unlock"}, expected=409)
+            assert request(f"/v1/runs/{running}")["state"] == "unknown"
+            request("/v1/lanes/synthetic-test/resolve-unknown", {"action":"adopt_running","evidence":"re-observe durable ScriptedExecutor identity","reason":"synthetic recovery acceptance"})
+            assert request(f"/v1/runs/{running}")["state"] == "running"
+            report["checks"].append("unknown retains ownership; human stop assertion rejected; independent scripted observation restores running")
             timeout = subprocess.run([binary, "--url", url, "wait", pending["id"], "--timeout-seconds", "0"], env={**env, "AUTO_DELIVER_TOKEN":operator}, capture_output=True, text=True, timeout=10)
             assert timeout.returncode == 124, timeout.stderr
             assert get_request(pending["id"])["status"] == "waiting"

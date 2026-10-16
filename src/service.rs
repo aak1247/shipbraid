@@ -242,6 +242,42 @@ impl Service {
         deadline_at: Option<chrono::DateTime<Utc>>,
         reason: String,
     ) -> Result<SubmitOutcome, ServiceError> {
+        // Resolve Git ancestry before taking the serialized ledger writer.
+        // Concurrent submissions can therefore do their read-only local Git
+        // checks in parallel instead of holding up commits behind a child
+        // process. Keep the async runtime responsive while Git runs.
+        if !is_full_revision(&revision) {
+            return Err(DomainError::TargetNotAllowed(
+                "revision must be a full immutable Git object ID".to_owned(),
+            )
+            .into());
+        }
+        let preliminary_lane = self
+            .state
+            .read()
+            .await
+            .lanes
+            .get(&lane_id)
+            .cloned()
+            .ok_or_else(|| DomainError::LaneNotFound(lane_id.clone()))?;
+        let lineage = self.lineage.clone();
+        let repository_id = preliminary_lane.repository_id.clone();
+        let release_ref = preliminary_lane.release_ref.clone();
+        let proof_revision = revision.clone();
+        let release_line_id = preliminary_lane.release_line_id.clone();
+        let config_version = preliminary_lane.config_version;
+        let authorization = tokio::task::spawn_blocking(move || {
+            lineage.resolve_submission(
+                &repository_id,
+                &release_ref,
+                &proof_revision,
+                &release_line_id,
+                config_version,
+            )
+        })
+        .await
+        .map_err(|error| ServiceError::Storage(anyhow::Error::new(error)))?;
+
         let _writer = self.writer.lock().await;
         let previous = self.state.read().await.clone();
         let lane = previous
@@ -249,6 +285,23 @@ impl Service {
             .get(&lane_id)
             .cloned()
             .ok_or_else(|| DomainError::LaneNotFound(lane_id.clone()))?;
+        // Config may have been reloaded while the proof was being computed.
+        // A proof for an old lane snapshot must never authorize a new target.
+        if preliminary_lane.id != lane.id
+            || preliminary_lane.repository_id != lane.repository_id
+            || preliminary_lane.release_ref != lane.release_ref
+            || preliminary_lane.release_line_id != lane.release_line_id
+            || preliminary_lane.profile_digest != lane.profile_digest
+            || preliminary_lane.config_version != lane.config_version
+            || authorization.repository_id != lane.repository_id
+            || authorization.release_ref != lane.release_ref
+            || authorization.revision != revision
+            || authorization.release_line_id != lane.release_line_id
+            || authorization.config_version != lane.config_version
+            || authorization.relation != crate::domain::LineageRelation::Ancestor
+        {
+            return Err(DomainError::LineageUnproven.into());
+        }
         let target = Target {
             repository_id: lane.repository_id.clone(),
             revision: revision.clone(),
@@ -258,13 +311,6 @@ impl Service {
             config_version: lane.config_version,
             coverage_mode,
         };
-        let authorization = self.lineage.resolve_submission(
-            &lane.repository_id,
-            &lane.release_ref,
-            &revision,
-            &lane.release_line_id,
-            lane.config_version,
-        );
         let is_replay = previous.requests.values().any(|request| {
             request.principal == principal
                 && request.idempotency_key == idempotency_key
@@ -288,12 +334,6 @@ impl Service {
             .count();
         if !is_replay && pending_count >= MAX_PENDING_REQUESTS_PER_LANE {
             return Err(ServiceError::QueueFull);
-        }
-        if !is_full_revision(&target.revision) {
-            return Err(DomainError::TargetNotAllowed(
-                "revision must be a full immutable Git object ID".to_owned(),
-            )
-            .into());
         }
         let coverage = self.coverage_context(&previous, Some(&target), Some(&lane_id));
         let mut next = previous.clone();
@@ -486,13 +526,20 @@ impl Service {
                     )?;
                 }
                 ExecutorEventKind::Unknown => {
-                    let command = command.ok_or(DomainError::CommandNotFound)?;
-                    engine.command_delivery(
+                    // Transport acknowledgement stays historical fact. A
+                    // later loss of execution observability independently
+                    // blocks the run; it cannot be discarded as an ack replay.
+                    if let (Some(expected), Some(supplied)) =
+                        (run.executor_ref.as_deref(), executor_ref.as_deref())
+                        && expected != supplied
+                    {
+                        return Err(DomainError::ExecutorMismatch.into());
+                    }
+                    engine.mark_unknown(
                         state,
-                        command.id,
-                        CommandDelivery::Unknown {
-                            reason: bounded_text(&reason, 2048),
-                        },
+                        run_id,
+                        generation,
+                        &bounded_text(&reason, 2048),
                         now,
                     )?;
                 }
@@ -1436,5 +1483,60 @@ mod tests {
                 && command.kind == CommandKind::Verify
                 && command.delivery_state == CommandDeliveryState::Pending
         }));
+    }
+    #[tokio::test]
+    async fn lost_observation_after_ack_blocks_until_independent_evidence() {
+        let (_temp, service) = test_service().await;
+        let (run_id, command_id) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+        let run = service.snapshot().await.runs[&run_id].clone();
+        service
+            .executor_event(
+                run_id,
+                run.generation,
+                ExecutorEventKind::Unknown,
+                run.executor_ref.clone(),
+                "observation lost after a known start".into(),
+                false,
+            )
+            .await
+            .unwrap();
+        let unknown = service.snapshot().await;
+        assert_eq!(unknown.runs[&run_id].state, RunState::Unknown);
+        assert_eq!(unknown.lanes["test-lane"].active_run_id, Some(run_id));
+        assert_eq!(
+            unknown.commands[&command_id].delivery_state,
+            CommandDeliveryState::Acknowledged
+        );
+        assert!(
+            service
+                .resolve_unknown(
+                    "test-lane".into(),
+                    ResolveAction::ConfirmStopped,
+                    "human assertion".into(),
+                    "no independent stop proof".into()
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            service.snapshot().await.runs[&run_id].state,
+            RunState::Unknown
+        );
+        service
+            .resolve_unknown(
+                "test-lane".into(),
+                ResolveAction::AdoptRunning,
+                "re-observe scripted identity".into(),
+                "recover known synthetic execution".into(),
+            )
+            .await
+            .unwrap();
+        let restored = service.snapshot().await;
+        assert_eq!(restored.runs[&run_id].state, RunState::Running);
+        assert_eq!(
+            ScriptedExecutor::synthetic_physical_start_count(&restored),
+            1
+        );
     }
 }
