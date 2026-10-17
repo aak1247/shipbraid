@@ -12,6 +12,10 @@ Shipbraid 协调开发者、Agent 和自动化提交的上线需求。兼容请�
 
 Cargo package 与可执行文件统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀，新安装使用 `shipbraid.service`。已有安装升级前请阅读[改名与升级说明](docs/naming.md)。
 
+![Shipbraid 发布协调台：发布请求及已通过的环境验收回执](docs/assets/shipbraid-dashboard.png)
+
+只读 Dashboard 展示发布请求、关联执行与环境验收回执。
+
 ## 为什么需要 Shipbraid？
 
 多个调用者可能同时要求发布同一版本。新的紧急版本可能覆盖已排队的需求。某次 CI 被取消后，调用者仍然需要知道自己的改动是否真正上线。
