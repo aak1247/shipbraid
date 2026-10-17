@@ -20,7 +20,7 @@ use uuid::Uuid;
 
 use crate::{
     api::{self, ExecutorEventKind, ResolveAction},
-    config::{Config, HookConfig, LaneExecutorConfig, ResolvedToken},
+    config::{Config, ConfigMode, HookConfig, LaneExecutorConfig, ResolvedToken},
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, CoverageMode, DomainError,
         ExecutorResult, LOCAL_TENANT_ID, Lane, Phase, Priority, ReconcileIds, ReleaseRequest,
@@ -169,6 +169,10 @@ impl Service {
         let lineage = LineageResolver::new(mirrors).context("validate local bare Git mirrors")?;
         let store = Store::open(&database_path).await?;
         let mut state = store.load_state().await?;
+        if config.mode == ConfigMode::Local {
+            let project = &config.lanes[0].project;
+            validate_local_history(&state, project)?;
+        }
         let before_config = state.clone();
         let engine = Engine::new(EngineConfig {
             max_active_runs: config.max_active_runs,
@@ -340,6 +344,10 @@ impl Service {
             return Err(ServiceError::NotReady);
         }
         self.store.ping().await.map_err(ServiceError::Storage)
+    }
+
+    pub(crate) fn begin_shutdown(&self) {
+        self.ready.store(false, Ordering::Release);
     }
 
     #[allow(
@@ -2209,6 +2217,9 @@ impl Service {
 }
 
 pub async fn serve(config: Config) -> anyhow::Result<()> {
+    if config.mode == ConfigMode::Local {
+        bail!("serve requires a server-mode configuration");
+    }
     let service = Service::open(config.clone()).await?;
     let listener = tokio::net::TcpListener::bind(config.listen)
         .await
@@ -2289,6 +2300,29 @@ fn canonical_database_path(path: &Path) -> anyhow::Result<PathBuf> {
         .with_context(|| format!("resolve database directory {}", parent.display()))?;
     let filename = path.file_name().context("database path must name a file")?;
     Ok(parent.join(filename))
+}
+
+fn validate_local_history(state: &State, project: &str) -> anyhow::Result<()> {
+    if state
+        .lanes
+        .values()
+        .any(|lane| lane.project.as_str() != project)
+    {
+        bail!("local mode cannot open ledger history from another project");
+    }
+    for request in state.requests.values() {
+        if request.principal != crate::local::LOCAL_PRINCIPAL {
+            bail!("local mode cannot open ledger requests from another principal");
+        }
+        if !state
+            .lanes
+            .get(&request.lane_id)
+            .is_some_and(|lane| lane.project.as_str() == project)
+        {
+            bail!("local mode cannot open ledger requests outside its project");
+        }
+    }
+    Ok(())
 }
 
 struct DatabaseLock(File);
@@ -2432,6 +2466,76 @@ mod tests {
         domain::{LineageRelation, ReconcileOutcome, SubmitInput, TargetAuthorization},
     };
 
+    #[test]
+    fn local_history_rejects_other_projects_and_nonlocal_principals() {
+        let mut state = State::default();
+        let lane = Lane {
+            tenant_id: LOCAL_TENANT_ID.into(),
+            id: "lane".into(),
+            project: "project".into(),
+            environment: "test".into(),
+            enabled: true,
+            repository_id: "repo".into(),
+            release_ref: "refs/heads/main".into(),
+            release_line_id: "line".into(),
+            profile_digest: "profile".into(),
+            config_version: 1,
+            descendant_coverage_enabled: false,
+            preemption_enabled: false,
+            allowed_revisions: BTreeSet::new(),
+            allowed_components: BTreeSet::from(["app".into()]),
+            request_parameters: BTreeMap::new(),
+            active_run_id: None,
+            generation: 0,
+            blocked_reason: None,
+            failure_paused: false,
+        };
+        state.lanes.insert(lane.id.clone(), lane.clone());
+        assert!(validate_local_history(&state, "project").is_ok());
+
+        let mut other_project = state.clone();
+        other_project.lanes.get_mut("lane").unwrap().project = "other".into();
+        assert!(validate_local_history(&other_project, "project").is_err());
+
+        let now = Utc::now();
+        let request_id = Uuid::new_v4();
+        state.requests.insert(
+            request_id,
+            ReleaseRequest {
+                tenant_id: LOCAL_TENANT_ID.into(),
+                context: RequestContext::default(),
+                id: request_id,
+                lane_id: "lane".into(),
+                principal: "server-operator".into(),
+                idempotency_key: "key".into(),
+                request_hash: "hash".into(),
+                target: Target {
+                    repository_id: "repo".into(),
+                    revision: "a".repeat(40),
+                    components: BTreeSet::from(["app".into()]),
+                    profile_digest: "profile".into(),
+                    release_line_id: "line".into(),
+                    config_version: 1,
+                    coverage_mode: CoverageMode::Exact,
+                    parameters: BTreeMap::new(),
+                },
+                priority: Priority::Normal,
+                deadline_at: None,
+                status: RequestStatus::Waiting,
+                current_run_id: None,
+                satisfied_by_run: None,
+                satisfied_by_receipt: None,
+                reason: "fixture".into(),
+                waiting_reason: None,
+                created_at: now,
+                creation_sequence: 1,
+                auto_retries_used: 0,
+                manual_retries_used: 0,
+            },
+        );
+        assert!(validate_local_history(&state, "project").is_err());
+    }
+
     async fn test_service() -> (tempfile::TempDir, Arc<Service>) {
         let temp = tempfile::tempdir().unwrap();
         let mirror = temp.path().join("source.git");
@@ -2442,6 +2546,7 @@ mod tests {
             .unwrap();
         assert!(output.status.success(), "git init failed: {:?}", output);
         let config = Config {
+            mode: ConfigMode::Server,
             database_path: temp.path().join("ledger.sqlite3"),
             listen: "127.0.0.1:0".parse().unwrap(),
             tokens: vec![TokenConfig {
@@ -2530,6 +2635,7 @@ print(json.dumps(reply))
             timeout_ms: 5_000,
         };
         let config = Config {
+            mode: ConfigMode::Server,
             database_path: temp.path().join("ledger.sqlite3"),
             listen: "127.0.0.1:0".parse().unwrap(),
             tokens: vec![TokenConfig {

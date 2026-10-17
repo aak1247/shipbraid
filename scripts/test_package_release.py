@@ -35,6 +35,7 @@ class PackageReleaseTests(unittest.TestCase):
         for name in (
             "distribution.md",
             "diagnostics.md",
+            "local-cli.md",
             "hooks.md",
             "project-integration.md",
             "api.md",

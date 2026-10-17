@@ -15,6 +15,7 @@ import sys
 import tarfile
 import tempfile
 import time
+import tomllib
 import urllib.error
 import urllib.request
 import uuid
@@ -148,6 +149,7 @@ def main():
         url = f'http://127.0.0.1:{port}'
         installation = subprocess.run([
             sys.executable, str(bundle / 'install.py'), '--prefix', str(prefix),
+            '--mode', 'server',
             '--repository', str(mirror), '--project', 'bundle', '--environment', 'test',
             '--project-bundle', str(bundle / 'examples/standalone/project'),
             '--listen', f'127.0.0.1:{port}',
@@ -234,6 +236,75 @@ def main():
             assert not (demo / 'deployment-starts').exists()
             report['checks'].append('packaged doctor checks installed config before service startup without creating a ledger, lock, hook record or deployment marker; runtime checks are skipped by default')
             report['checks'].append('packaged doctor explicitly checks the local user manager and cgroup v2; degraded manager is a warning and no unit is started or stopped')
+
+            local_prefix = root / 'local installation with spaces'
+            local_install = subprocess.run([
+                sys.executable, str(bundle / 'install.py'), '--prefix', str(local_prefix),
+                '--repository', str(mirror), '--project', 'bundle-local', '--environment', 'test',
+                '--project-bundle', str(bundle / 'examples/standalone/project'),
+                '--listen', f'127.0.0.1:{free_port()}',
+            ], check=True, text=True, capture_output=True)
+            local_record = json.loads(local_install.stdout)
+            assert local_record['mode'] == 'local'
+            assert not local_record['service_started'] and not local_record['deployment_submitted']
+            for unused in ('etc/tokens.env', 'etc/admin.token', 'etc/operator.token', 'shipbraid.service'):
+                assert not (local_prefix / unused).exists(), unused
+            local_demo = root / 'local-fake-environment'
+            (local_prefix / 'etc/deploy.env').write_text(
+                f'SHIPBRAID_DEMO_ROOT={local_demo}\nSHIPBRAID_DEMO_DELAY_SECONDS=0.2\n')
+            local_binary = local_prefix / 'bin/shipbraid'
+            local_config = local_prefix / 'etc/config.toml'
+            # The local configuration does not need a listener setting. Supply
+            # an isolated occupied address solely to test that it is unused.
+            unused_local_port = free_port()
+            local_config.write_text(f'listen = "127.0.0.1:{unused_local_port}"\n' + local_config.read_text())
+            local_env = {key: value for key, value in os.environ.items()
+                         if not key.startswith(('SHIPBRAID_', 'AUTO_DELIVER_'))}
+            local_env['PYTHONDONTWRITEBYTECODE'] = '1'
+
+            def local_cli(*arguments, expected=0):
+                result = subprocess.run([str(local_binary), '--json', *arguments], env=local_env,
+                                        text=True, capture_output=True, timeout=90)
+                assert result.returncode == expected, (arguments, result.returncode, result.stderr, result.stdout)
+                return json.loads(result.stdout)
+
+            local_diagnosis = local_cli('doctor', '--config', str(local_config))
+            assert local_diagnosis['ok']
+            assert not (local_prefix / 'var/coordinator.db').exists()
+            assert not local_demo.exists()
+            # Occupied port proves local run does not start an HTTP listener.
+            local_settings = tomllib.loads(local_config.read_text())
+            local_host, local_port = local_settings['listen'].rsplit(':', 1)
+            with socket.socket() as occupied:
+                occupied.bind((local_host.strip('[]'), int(local_port)))
+                occupied.listen()
+                local_result = local_cli('run', '--config', str(local_config),
+                                         '--revision', revisions[-1], '--components', 'app',
+                                         '--idempotency-key', 'packaged-local-first',
+                                         '--timeout-seconds', '60')
+            assert local_result['mode'] == 'local'
+            assert local_result['request']['status'] == 'satisfied'
+            assert local_result['receipt'] is not None
+            local_run = local_result['run']
+            assert local_run['state'] == 'succeeded'
+            local_identity = json.loads((local_prefix / 'var/runs' / local_run['id'] /
+                                         str(local_run['generation']) / 'request.json').read_text())
+            local_unit = local_identity['unit']
+            assert local_unit == f"shipbraid-local-{uuid.UUID(local_run['id']).hex}-g{local_run['generation']}.service"
+            units.append(local_unit)
+            wait_for(lambda: stopped(local_unit))
+            local_marker = local_demo / 'deployment-starts'
+            assert local_marker.read_text().splitlines() == [local_run['id']]
+            repeated = local_cli('run', '--config', str(local_config),
+                                 '--revision', revisions[-1], '--components', 'app',
+                                 '--idempotency-key', 'packaged-local-first')
+            assert repeated['reused'] and repeated['request_id'] == local_result['request_id']
+            assert local_marker.read_text().splitlines() == [local_run['id']]
+            resumed = local_cli('run', '--config', str(local_config), '--resume', local_result['request_id'])
+            assert resumed['request_id'] == local_result['request_id']
+            assert local_marker.read_text().splitlines() == [local_run['id']]
+            report['checks'].append('default local installation creates no coordinator unit or API tokens; doctor passes without opening a ledger or deploying')
+            report['checks'].append('packaged local run verifies a synthetic deployment without an HTTP listener or client credentials; replay and resume preserve one dispatch')
 
             service = start_service()
             assert cli('system')['api_version'] == '1'
@@ -374,6 +445,7 @@ def main():
             failure_url = f'http://127.0.0.1:{failure_port}'
             subprocess.run([
                 sys.executable, str(bundle / 'install.py'), '--prefix', str(failure_prefix),
+                '--mode', 'server',
                 '--repository', str(mirror), '--project', 'failure', '--environment', 'test',
                 '--project-bundle', str(failure_bundle), '--listen', f'127.0.0.1:{failure_port}',
             ], check=True, text=True, capture_output=True)

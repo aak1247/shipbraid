@@ -1,10 +1,21 @@
 # Agent 发布管理
 
-Shipbraid 接受同一团队内多个 Agent 通过 HTTP 或 CLI 协作。当前租户由服务端固定为 `local`，不接受客户端指定。项目与 CLI 统一使用 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀。项目接入与项目级 `AGENTS.md` 模板见[项目接入指南](project-integration.md)；已有安装升级见[改名说明](naming.md)。
+源码版本 **0.3.2-dev** 有两种入口：单项目由 `run` 在前台使用本地账本；需要共享协调时用 `serve` 和 HTTP 客户端。一个操作员处理一个项目时，local CLI 是直接路径；多个 Agent/CI 需要并发提交、共享排队或后台持续观察时，即使只有一个项目也应使用 server。跨项目协调或需要 Dashboard 也使用 server。已发布的 v0.3.1 尚无 `run`、local 配置模式和安装器 `--mode` 参数，以下新功能需要包含它们的后续二进制。项目与 CLI 统一使用 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀。项目接入与项目级 `AGENTS.md` 模板见[项目接入指南](project-integration.md)；已有安装升级见[改名说明](naming.md)。
 
-## 先确认项目已经接入
+## 单项目本机 CLI
 
-Shipbraid 协调发布请求，构建、部署和环境验收由项目配置的执行器完成。安装 CLI 或配置 token 不会自动接入当前仓库。先读当前项目的 `AGENTS.md` 或部署文档，找到团队服务地址、个人 token 文件、目标 lane、组件、允许的发布线和镜像同步方式。安装发行包中的 `shipbraid` 二进制后直接调用；日常 Agent 不需要源码构建。
+本机模式不启动 HTTP 服务，不需要 API/client token、协调器 unit 或 Dashboard：
+
+```bash
+shipbraid run --config "$HOME/.local/share/shipbraid/etc/config.toml" \
+  --revision <完整commit SHA> --components app --timeout-seconds 300
+```
+
+配置必须显式写 `mode = "local"`，且 lane 只能属于同一个项目。只有一个启用 lane 时可以省略 `--lane`；有多个时必须选择一个。同项目的多个环境可以保留在一个本地配置中。local 账本由一个运行进程独占；第二个并发 `run` 会因锁失败，不会排队提交。多个 Agent/CI 或持续后台观察请使用 shared server。完整参数、恢复和退出语义见[本机 CLI 指南](local-cli.md)。
+
+## 先确认服务端项目已经接入
+
+在 server 模式下，Shipbraid 协调发布请求，构建、部署和环境验收由项目配置的执行器完成。安装 CLI 或配置 token 不会自动接入当前仓库。先读当前项目的 `AGENTS.md` 或部署文档，找到团队服务地址、个人 token 文件、目标 lane、组件、允许的发布线和镜像同步方式。安装发行包中的 `shipbraid` 二进制后直接调用；日常 Agent 不需要源码构建。
 
 ```bash
 export SHIPBRAID_URL="https://shipbraid.example.com"
@@ -125,7 +136,7 @@ shipbraid --json priority REQUEST_ID urgent --reason "incident fix"
 
 ## 机器输出与退出码
 
-API 成功命令输出 JSON；本机 `doctor` 默认输出文本，带 `--json` 输出诊断报告。`--json` 模式下，HTTP、网络、本地配置、参数错误也在 stdout 输出：
+`run` 和 API 成功命令输出 JSON；本机 `doctor` 默认输出文本，带 `--json` 输出诊断报告。`--json` 模式下，HTTP、网络、本地配置、参数错误也在 stdout 输出：
 
 ```json
 {"error":{"code":"forbidden","message":"The configured token is not authorized for this operation.","retryable":false,"http_status":403}}
@@ -137,12 +148,13 @@ API 成功命令输出 JSON；本机 `doctor` 默认输出文本，带 `--json` 
 
 | 码 | 意义 |
 | --- | --- |
-| 0 | wait 已满足；其他命令调用成功 |
+| 0 | `wait`/local `run` 已满足；其他命令调用成功 |
 | 1 | 命令、配置或不可恢复调用错误 |
-| 2 | wait 需处理；或参数错误（结合 JSON/请求状态区分） |
-| 3 | 请求过期 |
-| 4 | 请求已撤回 |
-| 124 | 本地等待超时，请求仍在服务器上 |
+| 2 | `wait`/local `run` 需处理或为 `unknown`，或 CLI 参数错误（结合报告区分） |
+| 3 | `wait`/local `run` 观察到请求过期 |
+| 4 | `wait`/local `run` 观察到请求已撤回 |
+| 124 | `wait` 客户端超时，或 local `run` 等待期限结束；请求未撤回 |
+| 130 | local `run` 收到中断；本机调度停止，请求未撤回 |
 
 ## CLI 命令参考
 
@@ -167,11 +179,12 @@ shipbraid --version
 | `-h, --help` | 无 | 显示当前命令帮助，不访问服务端 |
 | `-V, --version` | 无 | 显示 CLI 版本，不访问服务端 |
 
-全局选项可放在子命令前后。命令行值优先于环境变量。`doctor`、`serve`、`health` 和 help/version 无需客户端 token；其他 API 命令需要 token。通常返回 15 秒后超时；`wait` 另有本地等待期限。
+全局选项可放在子命令前后。命令行值优先于环境变量。`run`、`doctor`、`serve`、`health` 和 help/version 无需客户端 token；`run` 从 local 配置读取目标，不会调用 `--url` 指向的服务。其他 API 命令需要 token。通常返回 15 秒后超时；`wait` 另有本地等待期限。
 
 | 命令 | 用途 | 权限边界 |
 | --- | --- | --- |
-| `serve` | 按配置启动持久协调器 | 服务配置和执行器访问权限 |
+| `run` | 在前台提交/恢复一个本地项目请求并调度 | local 配置和本机文件访问；不使用 API token |
+| `serve` | 按配置启动持久协调器 | server 配置和执行器访问权限 |
 | `doctor` | 本机只读前提检查，详见[诊断指南](diagnostics.md)；0.3.2-dev 新增，v0.3.1 无此命令 | 本机配置和服务凭据环境，无需客户端身份 |
 | `submit` | 创建不可变发布请求 | 目标 lane；urgent 还需 urgent/admin 能力 |
 | `wait` | 轮询一个请求 | 对应 lane 的读取权限 |
@@ -184,6 +197,18 @@ shipbraid --version
 | `health` | 检查 `/ready` | 无需 token |
 
 `system` 中主体的能力不代表可操作所有请求；服务端对每次写操作重新检查 lane、主体和请求状态。
+
+### run：本机前台执行
+
+```text
+shipbraid run --config <PATH> [--lane <LANE>] --revision <FULL_SHA> \
+  --components <app[,worker]> [选项]
+shipbraid run --config <PATH> --resume <REQUEST_ID> [--retry] [--timeout-seconds <SECONDS>]
+```
+
+`run` 仅接受 `mode = "local"` 配置。初次提交支持 `--coverage exact|descendant`、`--priority normal|urgent`、`--deadline <RFC3339>`、`--reason <TEXT>`、`--idempotency-key <KEY>`、`--task-id <ID>`、`--session-id <ID>` 和可重复的 `--param KEY=VALUE`。参数必须由 lane 声明且不得包含秘密。只有一个启用 lane 时可省略 `--lane`；local 不接受跨项目配置。恢复模式只能指定 `--resume`、`--retry` 和等待期限，不能混入新目标或上下文。`--retry` 只重试已证明失败的请求，不能解除 `unknown`。
+
+等待期限默认 300 秒，`--timeout-seconds 0` 只创建/恢复请求并返回当前快照，不运行 scheduler tick。CLI 先在 stderr 提示 request id 和幂等键，再在 stdout 输出 JSON 报告。超时 `124` 或中断 `130` 停止本机调度，不撤回请求，也不证明独立执行器已停止；退出后没有后台观察，后续用同一 request id 恢复。一个 local ledger 同时只允许一个 coordinator 进程；需要多 Agent/CI 并发提交或后台观察时切换到 server。细节见[本机 CLI 指南](local-cli.md)。
 
 ### serve：启动协调器
 

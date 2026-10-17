@@ -9,6 +9,8 @@ use std::{
     time::{Duration, Instant},
 };
 
+mod local_cli;
+
 #[derive(Parser)]
 #[command(version, about = "发布请求协调器")]
 struct Cli {
@@ -36,6 +38,8 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Run one project's coordinator in the foreground without an HTTP server.
+    Run(local_cli::RunArgs),
     /// Check local prerequisites without opening the ledger or executing hooks.
     Doctor {
         /// Local coordinator TOML configuration, resolved like `serve --config`.
@@ -228,7 +232,7 @@ impl Coverage {
     }
 }
 #[derive(Debug, Serialize)]
-struct CliFailure {
+pub(crate) struct CliFailure {
     code: String,
     message: String,
     retryable: bool,
@@ -240,7 +244,7 @@ struct CliFailure {
     idempotency_key: Option<String>,
 }
 impl CliFailure {
-    fn new(code: &str, message: &str, retryable: bool) -> Self {
+    pub(crate) fn new(code: &str, message: &str, retryable: bool) -> Self {
         Self {
             code: code.into(),
             message: message.into(),
@@ -254,6 +258,7 @@ impl CliFailure {
 impl Cli {
     fn validate(&self) -> std::result::Result<(), CliFailure> {
         match &self.command {
+            Command::Run(args) => args.validate(),
             Command::Logs {
                 run_id,
                 after,
@@ -526,7 +531,7 @@ fn request_logs_path(
     }
     Ok(format!("{path}?{}", url.query().unwrap_or_default()))
 }
-fn output(value: &Value) -> Result<()> {
+pub(crate) fn output(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
 }
@@ -586,6 +591,9 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     cli.validate()?;
+    if let Command::Run(args) = &cli.command {
+        return local_cli::run(args, cli.json).await;
+    }
     if let Command::Doctor {
         config,
         check_local_runtime,
@@ -615,7 +623,7 @@ async fn run(cli: Cli) -> Result<u8> {
     };
     let api = Api::new(&cli.url, token)?;
     let value = match cli.command {
-        Command::Serve { .. } | Command::Doctor { .. } => unreachable!(),
+        Command::Serve { .. } | Command::Doctor { .. } | Command::Run(_) => unreachable!(),
         Command::Submit {
             lane,
             project,

@@ -13,6 +13,8 @@
 
 新增独立迭代：[同团队 Agent 发布闭环](features/iter-20261017-agent-workflow/execution-plan.md)（2026-10-17，本轮 DONE 不关闭本计划剩余项）。
 
+使用入口迭代：[单项目前台 CLI 与共享 Server](features/iter-20261017-local-cli/execution-plan.md)（2026-10-17；同一内核，无 HTTP 的 local run；不关闭本计划原有未验收项）。
+
 ## 2. Scope Lock
 
 允许范围：本仓库 Cargo 工程、src、migrations、tests、配置样例、文档及本项目自身质量检查。一个 package、一个服务、SQLite、HTTP/CLI、受控本地 Git 关系证明、ScriptedExecutor 和 React/TypeScript/Tailwind 只读 Dashboard。

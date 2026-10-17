@@ -12,6 +12,7 @@ use crate::domain::{ParameterSpec, validate_parameter_specs};
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct Config {
+    pub mode: ConfigMode,
     pub database_path: PathBuf,
     pub listen: SocketAddr,
     pub tokens: Vec<TokenConfig>,
@@ -26,6 +27,7 @@ pub struct Config {
 impl Default for Config {
     fn default() -> Self {
         Self {
+            mode: ConfigMode::Server,
             database_path: "./data/shipbraid.db".into(),
             listen: "127.0.0.1:8787".parse().unwrap(),
             tokens: vec![],
@@ -38,6 +40,14 @@ impl Default for Config {
             dashboard_dir: None,
         }
     }
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum ConfigMode {
+    Local,
+    #[default]
+    Server,
 }
 
 #[derive(Clone, Deserialize)]
@@ -233,8 +243,30 @@ impl Config {
         {
             bail!("concurrency and timing settings must be positive");
         }
-        if self.tokens.is_empty() {
-            bail!("at least one authentication token must be configured");
+        match self.mode {
+            ConfigMode::Local => {
+                if !self.tokens.is_empty() {
+                    bail!("local mode does not allow API tokens");
+                }
+                if self.dashboard_dir.is_some() {
+                    bail!("local mode does not allow a dashboard directory");
+                }
+                if self.lanes.is_empty() {
+                    bail!("local mode requires at least one lane");
+                }
+                let project = &self.lanes[0].project;
+                if self
+                    .lanes
+                    .iter()
+                    .any(|lane| lane.project.as_str() != project)
+                {
+                    bail!("local mode lanes must belong to one project");
+                }
+            }
+            ConfigMode::Server if self.tokens.is_empty() => {
+                bail!("at least one authentication token must be configured");
+            }
+            ConfigMode::Server => {}
         }
         if self
             .dashboard_dir
@@ -453,6 +485,69 @@ fn validate_hook_args(lane: &str, operation: &str, args: &[String]) -> Result<()
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn local_lane(id: &str, project: &str, repository_path: &Path) -> LaneConfig {
+        LaneConfig {
+            id: id.into(),
+            project: project.into(),
+            environment: "test".into(),
+            repository_id: format!("{project}-repository"),
+            repository_path: repository_path.to_path_buf(),
+            release_ref: "refs/heads/main".into(),
+            profile_digest: "profile".into(),
+            components: vec!["app".into()],
+            request_parameters: BTreeMap::new(),
+            allow_descendant: false,
+            allow_preemption: false,
+            enabled: true,
+            executor: LaneExecutorConfig::Scripted,
+            failure_observe: None,
+        }
+    }
+
+    #[test]
+    fn omitted_mode_preserves_server_and_local_mode_is_single_project_without_api_surface() {
+        let legacy: Config = toml::from_str("").unwrap();
+        assert_eq!(legacy.mode, ConfigMode::Server);
+        assert!(legacy.validate().is_err(), "server still requires a token");
+
+        let temp = tempfile::tempdir().unwrap();
+        let base = Config {
+            mode: ConfigMode::Local,
+            lanes: vec![local_lane("dev", "project", temp.path())],
+            ..Config::default()
+        };
+        assert!(base.validate().is_ok(), "local mode needs no API token");
+
+        let mut multiple_environments = base.clone();
+        let mut second = local_lane("prod", "project", temp.path());
+        second.environment = "prod".into();
+        multiple_environments.lanes.push(second);
+        assert!(multiple_environments.validate().is_ok());
+
+        let mut cross_project = base.clone();
+        cross_project
+            .lanes
+            .push(local_lane("other", "other-project", temp.path()));
+        assert!(cross_project.validate().is_err());
+
+        let mut with_token = base.clone();
+        with_token.tokens.push(TokenConfig {
+            id: "operator".into(),
+            token_env: "TOKEN".into(),
+            lanes: vec!["dev".into()],
+            projects: vec![],
+            urgent: false,
+            admin: false,
+            executor: false,
+        });
+        assert!(with_token.validate().is_err());
+
+        let mut with_dashboard = base;
+        with_dashboard.dashboard_dir = Some(temp.path().to_path_buf());
+        assert!(with_dashboard.validate().is_err());
+    }
+
     #[test]
     fn rejects_zero_capacity_and_missing_auth() {
         assert!(Config::default().validate().is_err());

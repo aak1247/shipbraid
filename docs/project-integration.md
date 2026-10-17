@@ -1,6 +1,8 @@
 # 接入自己的项目
 
-Shipbraid 是协调器，不是项目构建或部署系统。优先使用团队已经运行的二进制服务；开发者只需安装发行包中的 CLI，获取服务地址、个人 token 文件和管理员注册的 lane。不要为已经由服务管理的环境再启动一个独立账本。新建服务或升级服务时按[发行包指南](distribution.md)操作。
+Shipbraid 协调发布请求，项目仍提供自己的构建、部署和独立验收。源码 0.3.2-dev 的单项目默认使用[本机前台 CLI](local-cli.md)，不需要 HTTP 服务或客户端 token；跨项目、多个提交者并发或 Dashboard 使用 Server。已发布的 v0.3.1 仅支持原 Server/client 流程，尚无 local/run 功能。
+
+项目已有团队服务时，开发者安装兼容 CLI，取得地址、个人 token 文件和已注册 lane。不要为已经由服务管理的环境再启动一个独立账本。新装、接入和升级按[发行包指南](distribution.md)操作。
 
 ```text
 项目 Agent → shipbraid CLI → 已登记 lane → 项目执行器 → 现有构建/部署工具
@@ -22,7 +24,7 @@ Shipbraid 是协调器，不是项目构建或部署系统。优先使用团队�
 
 | 信息 | 示例或用途 |
 | --- | --- |
-| 服务与身份 | 团队服务 URL、Agent principal、私有 token 文件位置 |
+| 运行入口 | local 的私有配置/账本位置；或 server 的 URL、Agent principal、私有 token 文件位置 |
 | 项目目标 | project、environment、lane 和允许发布的组件 |
 | 发布线 | 受信仓库身份、服务端本地镜像、允许的 ref |
 | 同步方式 | Agent 如何推送，既有流程如何更新并确认镜像 |
@@ -54,6 +56,33 @@ Shipbraid 是协调器，不是项目构建或部署系统。优先使用团队�
 模拟执行器和合成项目只验证 Shipbraid 协议，不证明真实环境已接通。生产 lane 需另行明确授权并完成同等级的环境验收；不得因测试 lane 通过而自动开放生产权限。
 
 ## 项目 `AGENTS.md` 参考模板
+
+选择与实际安装一致的入口，记录 binary 兼容版本、受信镜像同步和独立验收证据。配置、账本、任务目录和凭据保存在源码仓库外。
+
+### 单项目 local 模板（0.3.2-dev+）
+
+````markdown
+## 使用 Shipbraid 发布
+
+- 入口：local；配置：<私有绝对路径>；binary：<包含 run 功能的发行版本>。
+- 目标：<项目、环境、lane、允许组件>；版本同步：<受信镜像同步与确认方式>。
+- 本配置只管理本项目，账本同时只能由一个 run 持有；不启动另一个账本管理相同部署环境。
+- 不运行 HTTP 客户端命令来查询本地账本；按原 request id 恢复前台调度。
+- CLI 超时/中断不撤回请求，也不证明独立部署已停止；Unknown 保留所有权，不盲目换 key 或强制解锁。
+- 只在请求 satisfied 且 receipt 匹配本次目标时报告成功；生产操作仍需项目的明确授权。
+- 不提交数据库、任务目录、私钥、token、部署凭据或秘密日志。
+
+```bash
+shipbraid --json run --config <私有配置路径> --lane <已登记lane> \
+  --revision "$(git rev-parse HEAD)" --components app --task-id issue-42
+# 已有请求：恢复原请求，不能用新提交代替状态查询。
+shipbraid --json run --config <同一配置路径> --resume REQUEST_ID
+```
+
+SHA 必须已同步到配置镜像。仅传 lane 已声明的非秘密参数。保存 request id 与幂等键；失败重试只在独立停止证明成立后显式使用 --resume REQUEST_ID --retry。
+````
+
+### 共享 Server 模板
 
 把以下约束和实际 lane、组件、token 文件位置合并到项目自己的 Agent 指南。token 只放在受控文件或凭据系统中，不提交其值。
 

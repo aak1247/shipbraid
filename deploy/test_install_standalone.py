@@ -53,7 +53,8 @@ class StandaloneInstallTests(unittest.TestCase):
         self.args = SimpleNamespace(prefix=self.root / 'installation with space',
                                     bundle_root=self.bundle, project='fixture', environment='dev',
                                     components='app', listen='127.0.0.1:8787', repository=mirror,
-                                    release_ref='refs/heads/main', project_bundle=self.project)
+                                    release_ref='refs/heads/main', project_bundle=self.project,
+                                    mode='server')
 
     def tearDown(self):
         # Only fixtures owned by this test: make frozen release directories removable.
@@ -64,6 +65,13 @@ class StandaloneInstallTests(unittest.TestCase):
 
     def write_manifest(self):
         (self.bundle / 'manifest.json').write_text(json.dumps(self.manifest))
+
+    def test_cli_defaults_to_local_and_accepts_explicit_server(self):
+        base_args = ['--project', 'fixture', '--repository', str(self.root / 'mirror.git'),
+                     '--project-bundle', str(self.project)]
+        self.assertEqual(installer.build_parser().parse_args(base_args).mode, 'local')
+        self.assertEqual(installer.build_parser().parse_args(base_args + ['--mode', 'server']).mode,
+                         'server')
 
     def test_fresh_install_has_private_scoped_config_and_no_execution(self):
         before = subprocess.check_output(['git', '-C', str(self.args.repository), 'show-ref'])
@@ -88,6 +96,33 @@ class StandaloneInstallTests(unittest.TestCase):
         self.assertEqual((release / 'project').stat().st_mode & 0o222, 0)
         self.assertIn('ExecStart="' + str(release / 'bin/shipbraid') + '"',
                       (prefix / 'shipbraid.service').read_text())
+        self.assertEqual(result['mode'], 'server')
+        self.assertEqual(tomllib.loads((prefix / 'etc/config.toml').read_text())['mode'], 'server')
+        self.assertTrue(Path(result['admin_token_file']).is_file())
+
+    def test_local_install_has_no_api_credentials_dashboard_or_service_unit(self):
+        del self.args.mode
+        result = installer.install(self.args)
+        prefix = self.args.prefix
+        config = tomllib.loads((prefix / 'etc/config.toml').read_text())
+        self.assertEqual(result['mode'], 'local')
+        self.assertEqual(config['mode'], 'local')
+        self.assertNotIn('tokens', config)
+        self.assertNotIn('dashboard_dir', config)
+        self.assertNotIn('listen', config)
+        self.assertFalse((prefix / 'etc/operator.token').exists())
+        self.assertFalse((prefix / 'etc/admin.token').exists())
+        self.assertFalse((prefix / 'etc/tokens.env').exists())
+        self.assertFalse((prefix / 'shipbraid.service').exists())
+        self.assertEqual((prefix / 'etc/deploy.env').stat().st_mode & 0o777, 0o600)
+        self.assertTrue(Path(result['binary']).is_symlink())
+        self.assertTrue(Path(result['adapter_config']).is_file())
+        self.assertTrue(Path(result['deploy_env']).is_file())
+        self.assertNotIn('operator_token_file', result)
+        self.assertNotIn('admin_token_file', result)
+        self.assertNotIn('unit', result)
+        self.assertFalse(result['service_started'])
+        self.assertFalse(result['deployment_submitted'])
 
     def test_reinstall_preserves_all_original_files(self):
         result = installer.install(self.args)
@@ -153,6 +188,7 @@ class StandaloneInstallTests(unittest.TestCase):
             path.unlink()
 
     def test_ipv6_listener_requires_socket_address_brackets(self):
+        self.args.mode = 'server'
         self.args.listen = '::1:8787'
         with self.assertRaisesRegex(ValueError, 'loopback'):
             installer.install(self.args)

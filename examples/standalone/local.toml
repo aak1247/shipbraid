@@ -1,0 +1,20 @@
+# Synthetic single-project local CLI fixture. Copy this file outside a project
+# checkout, then create data/source.git beside it as described in README.md.
+mode = "local"
+database_path = "data/shipbraid.db"
+max_active_runs = 1
+tick_ms = 100
+scripted_phase_ms = 100
+
+[[lanes]]
+id = "demo-dev"
+project = "demo"
+environment = "dev"
+repository_id = "demo"
+repository_path = "data/source.git"
+release_ref = "refs/heads/main"
+profile_digest = "synthetic-local-v1"
+components = ["app"]
+allow_descendant = false
+allow_preemption = false
+enabled = true

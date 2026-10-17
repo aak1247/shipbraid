@@ -31,6 +31,7 @@ REQUIRED_FILES = (
     ("deploy/install-standalone.py", "install.py"),
     ("docs/distribution.md", "docs/distribution.md"),
     ("docs/diagnostics.md", "docs/diagnostics.md"),
+    ("docs/local-cli.md", "docs/local-cli.md"),
     ("docs/hooks.md", "docs/hooks.md"),
     ("docs/project-integration.md", "docs/project-integration.md"),
     ("docs/api.md", "docs/api.md"),

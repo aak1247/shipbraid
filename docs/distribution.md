@@ -2,7 +2,7 @@
 
 Shipbraid 的用户入口是发行包中的 `bin/shipbraid`，同一个程序提供服务端和 CLI。Dashboard 已构建在 `web/`，运行时无需 Rust、Cargo、Node.js 或 pnpm。源码构建只供维护者和贡献者使用。
 
-首版发行目标为 **Linux x86_64 GNU**。官方 workflow 使用 Ubuntu 22.04 构建；需要兼容该构建环境的 glibc（2.35+），其他发行版仍需验收。CLI 不需要 Python/systemd；下面的安装器、适配器和 GitHub 接收器需要 Python **3.11+**。本机部署适配器额外需要 Git、systemd **249+** user manager 和 cgroup v2。需要 bash/python3 的项目脚本应自行具备其依赖。
+首版发行目标为 **Linux x86_64 GNU**。官方 workflow 使用 Ubuntu 22.04 构建；需要兼容该构建环境的 glibc（2.35+），其他发行版仍需验收。CLI 需要 Git 来校验受信本地镜像与版本关系，但不需要 Python/systemd；安装器、适配器和 GitHub 接收器需要 Python **3.11+**。本机部署适配器还需要 systemd **249+** user manager 和 cgroup v2。需要 bash/python3 的项目脚本应自行具备其依赖。
 
 ## 下载与检查
 
@@ -25,7 +25,7 @@ export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
 shipbraid --version
 ```
 
-校验和验证文件一致性，发行来源仍应通过受信 GitHub Release 确认。解压后的清单覆盖二进制、静态资源和工具；安装器会再次校验全部内容，不接受符号链接、缺失/额外文件或内容改变。不要在安装前修改发行包。自己的项目脚本和秘密放在包外。
+校验和验证文件一致性，发行来源仍应通过受信 GitHub Release 确认。解压后的清单覆盖二进制、静态资源和工具；安装器会再次校验全部内容，不接受符号链接、缺失/额外文件或内容改变。不要在安装前修改发行包。自己的项目脚本和秘密放在包外。已发布的 v0.3.1 仍是 server/client 版本，没有 `run`、`mode` 配置字段或安装器 `--mode` 参数；以下本机 CLI 与双模式安装说明对应源码 0.3.2-dev，须使用包含这些功能的后续二进制。
 
 ## 只安装客户端
 
@@ -40,9 +40,38 @@ shipbraid --json list lane
 
 日常操作见 [Agent 指南](agents.md)。不要为已经由其他协调器管理的环境启动第二个实例。
 
+## 单项目本机运行（0.3.2-dev+）
+
+一个操作员要在前台处理单项目时，使用 local 模式。它不启动 HTTP 服务、API client token、协调器 unit 或 Dashboard。local 配置由安装器生成，SQLite 账本、脚本和凭据放在私有 prefix（默认 `~/.local/share/shipbraid`，目录权限 `0700`），位于项目 Git checkout 之外。它允许同项目的多个环境，但一个账本只能管理一个项目。
+
+安装器默认 `--mode local`；需要初始化新 local prefix 时无需写该参数：
+
+```bash
+python3 "$SHIPBRAID_BUNDLE/install.py" \
+  --prefix "$HOME/.local/share/shipbraid" \
+  --project myapp --environment dev --components app \
+  --repository /srv/git/myapp.git --release-ref refs/heads/main \
+  --project-bundle /srv/myapp/shipbraid-scripts-v1
+```
+
+它复制已审查的项目 adapter bundle，生成 `etc/config.toml`、`etc/deploy.env` 和 release 内的 `adapter.json`，并创建 `bin/shipbraid`。local config 显式写 `mode = "local"`，不包含 `listen`、`dashboard_dir` 或 API token；不会生成 `tokens.env`、`operator.token`、`admin.token` 或 `shipbraid.service`。`installation.json` 仅列出当前存在的路径，不返回 server-only token/unit 路径。初始化只允许 dev/test，不会启动执行器、提交请求或更新 Git 镜像。
+
+确认项目 commit 已同步到配置的完整 bare mirror 后，直接前台运行：
+
+```bash
+SHIPBRAID_PREFIX="$HOME/.local/share/shipbraid"
+"$SHIPBRAID_PREFIX/bin/shipbraid" run \
+  --config "$SHIPBRAID_PREFIX/etc/config.toml" \
+  --revision <完整commit SHA> --components app --timeout-seconds 300
+```
+
+Local CLI 需要 Git；使用随附 Python adapter 的项目还需要 Python **3.11+**、systemd **249+** user manager 和 cgroup v2。第二个并发进程不能同时打开同一 local 账本；多个 Agent/CI 并发提交或需要后台持续观察时，即使只有一个项目，也应使用 server 模式。
+
+本机合成示例使用无 API token、无 Dashboard 的 local 配置和临时 bare mirror，详见 [`examples/standalone/local.toml`](../examples/standalone/local.toml) 与[示例说明](../examples/standalone/README.md)。它只生成合成回执，不代表真实项目验收。完整幂等、恢复、超时和退出语义见[本机 CLI 指南](local-cli.md)。
+
 ## 本地模拟
 
-此流程只使用发行二进制、Git 和 Python，生成临时模拟源仓库，不发布真实应用；不需要 systemd 或项目部署脚本。
+以下是已发布 v0.3.1 仍支持的 server/client 演示：它启动协调器与 Dashboard，并通过 API token 提交合成请求。它不使用新 `run` 命令，也不发布真实应用；若只想体验本机前台 CLI，请看上一节的 local 样例。
 
 ```bash
 SHIPBRAID_DEMO_DIR=$(mktemp -d)
@@ -82,7 +111,9 @@ git clone --mirror <受信项目仓库地址> /srv/git/myapp.git
 git --git-dir=/srv/git/myapp.git fetch --no-tags origin refs/heads/main:refs/heads/main
 ```
 
-安装到一个全新的私有目录，以下路径全部替换为项目实际值：
+### 单项目 local 安装
+
+源码 0.3.2-dev 安装器默认 local 模式。以下命令初始化一个全新、私有的 prefix；路径全部替换为项目实际值：
 
 ```bash
 python3 "$SHIPBRAID_BUNDLE/install.py" \
@@ -92,15 +123,40 @@ python3 "$SHIPBRAID_BUNDLE/install.py" \
   --project-bundle /srv/myapp/shipbraid-scripts-v1
 ```
 
-安装器只支持初始化 dev/test，拒绝覆盖已有 prefix，不启动服务、不提交发布、不更新镜像。它输出配置和 token **文件位置**；token 值保存在 mode0600 文件内。安装前应确认该环境没有其他部署写入所有者。
+安装器只支持初始化 dev/test，拒绝覆盖已有 prefix，不启动服务、不提交发布、不更新镜像。默认 prefix 权限为 `0700`；SQLite 账本和任务状态写入 prefix 的 `var/`，配置、adapter 和部署凭据都应留在项目 Git checkout 外。Local 安装只生成 `etc/config.toml`、`etc/deploy.env`、release 内的 `adapter.json` 和 `bin/shipbraid`，不生成 API token、`tokens.env`、Dashboard 配置或协调器 unit。`installation.json` 返回 mode 与本模式使用的路径（包括首次运行才创建的账本），不含 server 专用的 token/unit 键。
 
-生成内容：
+写好部署/验收专用凭据后，可先离线检查配置，再前台运行单项目请求：
+
+```bash
+SHIPBRAID_PREFIX="$HOME/.local/share/shipbraid"
+"$SHIPBRAID_PREFIX/bin/shipbraid" doctor --config "$SHIPBRAID_PREFIX/etc/config.toml"
+"$SHIPBRAID_PREFIX/bin/shipbraid" run --config "$SHIPBRAID_PREFIX/etc/config.toml" \
+  --revision <完整SHA> --components app --timeout-seconds 300
+```
+
+确认 SHA 已同步到 bare mirror。只有一个启用 lane 时可省略 `--lane`；同项目多个环境可共用 local 配置。一个 local ledger 同时只允许一个 `run` 进程；多个 Agent/CI 并发提交或后台持续观察时，即使只有一个项目，也应显式选择 shared server。超时或中断停止本机调度，不撤回请求，也不证明独立 systemd worker 已停止；按 request id 重新 `run --resume`。见[本机 CLI 指南](local-cli.md)。
+
+### 多个调用者或 Dashboard：Server 安装
+
+Server 是多项目或多调用者共享协调的入口；即使只管理一个项目，如果多个 Agent/CI 要并发提交、共同排队或持续后台观察，也使用它。包含双模式功能的源码 0.3.2-dev 安装器必须显式选择 `--mode server`：
+
+```bash
+python3 "$SHIPBRAID_BUNDLE/install.py" \
+  --mode server --prefix "$HOME/.local/share/shipbraid" \
+  --project myapp --environment dev --components app \
+  --repository /srv/git/myapp.git --release-ref refs/heads/main \
+  --project-bundle /srv/myapp/shipbraid-scripts-v1
+```
+
+v0.3.1 的旧安装器只有 server 行为、不接受 `--mode`；不要把上面的 flag 或 0.3.2-dev 的 local config 用于该旧二进制。此处其余 server 命令也要求具有 server 配置的二进制。
+
+Server 配置包含 loopback listener、Dashboard、operator/admin token，并生成待检查的 `shipbraid.service`。安装器不会启动服务或提交请求。输出的 token **文件路径**保存在 mode `0600` 文件内。安装前确认目标环境没有其他部署写入所有者。
 
 | 路径（相对 prefix） | 用途 |
 | --- | --- |
-| `bin/shipbraid` | 指向固定 release 的 CLI |
+| `bin/shipbraid` | 指向固定 release 的 CLI/server 二进制 |
 | `releases/<version>-<digest>/` | 二进制、Dashboard、本机适配器、项目脚本和 adapter.json |
-| `etc/config.toml` | 仓库、lane、权限与固定 hooks 路径 |
+| `etc/config.toml` | server 模式的仓库、lane、权限与固定 hooks 路径 |
 | `etc/operator.token` / `etc/admin.token` | 分开的普通发布/管理员身份 |
 | `etc/tokens.env` | 协调器身份环境文件，不能传给部署脚本 |
 | `etc/deploy.env` | 部署/验收专用凭据，KEY=value，无 shell 展开 |
@@ -109,11 +165,9 @@ python3 "$SHIPBRAID_BUNDLE/install.py" \
 
 检查配置和复制后的项目脚本，将部署专用凭据写入 `etc/deploy.env`。不要用该文件保存协调器 admin/operator token。保持旧 release 脚本和 adapter.json 不变；变更脚本包时安排维护并生成新版本目录。
 
-服务与 hook 适配器属于管理员审查的受信程序，运行在同一账号权限下。适配器为项目部署/验收脚本重新构造环境，避免把协调器 token 继续传给这些子进程；这不构成针对恶意项目代码的主机隔离。脚本包中隐藏文件、私钥、数据库和日志会被安装器拒绝复制，凭据单独留在 `etc/deploy.env`。
+Server 与 hook adapter 是管理员审查的受信程序，运行在同一账号权限下。Adapter 为项目部署/验收脚本重新构造环境，避免把协调器 token 继续传给这些子进程；这不构成针对恶意项目代码的主机隔离。脚本包中隐藏文件、私钥、数据库和日志会被安装器拒绝复制，凭据单独留在 `etc/deploy.env`。
 
-包含 `doctor` 的后续发行包可先按[只读诊断指南](diagnostics.md)检查配置和主机依赖，再启动服务；已发布的 v0.3.1 尚无该命令。诊断不会运行部署或打开账本，也不能代替环境验收。
-
-前台启动：
+包含 `doctor` 的二进制可先按[只读诊断指南](diagnostics.md)检查配置和主机依赖；已发布的 v0.3.1 尚无该命令。Server 前台启动：
 
 ```bash
 SHIPBRAID_PREFIX="$HOME/.local/share/shipbraid"

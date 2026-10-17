@@ -8,7 +8,7 @@
 
 Shipbraid 协调开发者、Agent 和自动化提交的上线需求。兼容请求共享执行；紧急请求在安全条件下替代可打断的工作；每个请求独立保留，直到匹配的环境验收证据确认交付。
 
-**当前状态：早期开发阶段。** 已实现本地模拟和可配置外部 hooks。安全抢占目前适用于模拟执行器，外部 hooks 整体不可抢占，生产通道默认禁用。
+**当前状态：早期开发阶段。** 当前源码新增了单项目的前台本机 CLI，但尚未进入 GitHub Release。已实现本地模拟和可配置外部 hooks。安全抢占目前适用于模拟执行器，外部 hooks 整体不可抢占，生产通道默认禁用。
 
 CLI 与服务端可执行文件统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀，新安装使用 `shipbraid.service`。已有安装升级前请阅读[改名与升级说明](docs/naming.md)。
 
@@ -46,7 +46,7 @@ flowchart LR
 
 覆盖判断同时检查仓库、通道、组件、配置、权限和版本策略。默认要求版本完全一致；显式启用的 `descendant` 模式还会验证 Git 祖先关系。祖先关系只证明版本历史，不能证明功能没有被 revert。
 
-Shipbraid 协调发布请求，具体构建与部署由各项目使用自己的工具。运行形态是单个服务、本地 SQLite 数据库、HTTP API、CLI，以及只读 Dashboard。
+Shipbraid 协调发布请求，具体构建与部署由各项目使用自己的工具。单个操作员可在前台运行一个项目的协调器，并使用私有本地账本。多个项目、多个 Agent/CI 并发提交、后台持续观察或需要 Dashboard 时，应使用共享 server。
 
 ## 快速开始：使用二进制
 
@@ -62,11 +62,13 @@ export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
 shipbraid --version
 ```
 
-第一次体验可直接按[本地模拟](docs/distribution.md#本地模拟)启动二进制和内置 Dashboard，不部署真实应用。需要发布自己的项目时，维护者先按[二进制安装与接入](docs/distribution.md#首次接入自己的项目)注册受信仓库、部署脚本和独立验收脚本。安装器和本机适配器需要 Python **3.11+**；本机任务由 systemd user manager 独立托管。安装本身不会启动服务或发布应用。
+源码版本 `0.3.2-dev` 新增 `shipbraid run --config PATH` 和默认 local 模式的独立安装器。已发布的 v0.3.1 发行包不含 `run`、local 配置模式或安装器 `--mode` 参数；单项目本机流程请使用包含该功能的后续发行包，并参阅[本机 CLI 指南](docs/local-cli.md)。Local CLI 需要 Git 校验受信镜像，但不需要 HTTP 服务或客户端 token。真实项目目前随附的 adapter 还需要 Python **3.11+**、systemd **249+** user manager 与 cgroup v2，并非零依赖部署运行时。
 
-源码版本 0.3.2-dev 新增供实例维护者使用的只读 `shipbraid doctor --config PATH`，详见[诊断指南](docs/diagnostics.md)。已发布的 v0.3.1 发行包尚无此命令。
+已发布的 v0.3.1 server 流程仍可使用[合成二进制模拟](docs/distribution.md#本地模拟)，不会部署真实应用。源码版本 0.3.2-dev 还提供只读 `shipbraid doctor --config PATH`，详见[诊断指南](docs/diagnostics.md)；v0.3.1 也没有该命令。
 
-项目已接入时，开发者只需团队提供的服务地址、token 文件和通道配置：
+### 共享 server 流程
+
+使用团队 server 时，开发者需要服务地址、个人 token 文件和已登记的目标。已发布的 v0.3.1 二进制支持以下 HTTP 流程：
 
 ```bash
 export SHIPBRAID_URL="http://127.0.0.1:8787"
@@ -89,7 +91,7 @@ Dashboard 由同一服务提供，默认打开 `http://127.0.0.1:8787`，输入�
 
 ## Agent 使用
 
-[Agent 使用指南](docs/agents.md)包含项目接入前提、目标发现、身份配置、CLI 命令参考、任务恢复、结构化错误和协作权限。当前租户由服务端固定为 `local`。安装 CLI 不会自动注册仓库：维护者先按[项目接入指南](docs/project-integration.md)配置，再把实际服务地址、lane、组件和发布步骤写入项目的 `AGENTS.md`。
+[Agent 使用指南](docs/agents.md)说明模式选择、项目接入前提、目标发现、身份配置、CLI 命令参考、任务恢复、结构化错误和协作权限。本机模式使用同用户信任边界，并且每个账本只管理一个项目。共享 server 当前将租户固定为 `local`；维护者先按[项目接入指南](docs/project-integration.md)注册仓库和 lane，再把服务地址、lane、组件和发布步骤写入项目的 `AGENTS.md`。
 
 ## 接入执行器
 
@@ -108,7 +110,7 @@ Dashboard 由同一服务提供，默认打开 `http://127.0.0.1:8787`，输入�
 ## 运行模型与当前限制
 
 - **单实例、本地存储。** SQLite 使用 WAL、FULL 同步与进程独占锁；使用本地持久卷，活动数据库通过 SQLite 在线备份 API 备份。
-- **显式权限边界。** 仓库、通道、组件、执行器与令牌能力均由管理员配置。调用者不能提交任意命令或仓库 URL。默认监听 loopback，远程访问应使用受控 HTTPS 入口。
+- **显式权限边界。** 仓库、通道、组件、执行器与（server 模式下的）令牌能力均由管理员配置。调用者不能提交任意命令或仓库 URL。Server 默认监听 loopback，远程访问应使用受控 HTTPS 入口。
 - **有证据才交接。** 取消响应、超时和心跳丢失都不能证明执行已经停止；unknown 会阻塞通道。部署与验收阶段不可抢占。
 - **至少一次交付。** 命令与事件可能重复投递，适配器需要处理重复及不确定投递；不保证外部副作用恰好执行一次。
 
@@ -142,6 +144,7 @@ pnpm --dir web build
 ## 文档
 
 - [二进制安装、项目脚本、webhook 与升级](docs/distribution.md)
+- [单项目本机 CLI](docs/local-cli.md)
 - [Agent 工作流与协作](docs/agents.md)
 - [项目接入与项目 AGENTS.md 模板](docs/project-integration.md)
 - [HTTP API 与 CLI 契约](docs/api.md)

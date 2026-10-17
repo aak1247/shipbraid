@@ -85,6 +85,9 @@ def unit_quote(value, *, executable_argument=False):
 
 
 def install(args):
+    mode = getattr(args, 'mode', 'local')
+    if mode not in ('local', 'server'):
+        raise ValueError('mode must be local or server')
     prefix = args.prefix.expanduser().absolute()
     if prefix.exists() or prefix.is_symlink():
         raise ValueError('installation prefix already exists; use the documented upgrade procedure')
@@ -98,14 +101,15 @@ def install(args):
         raise ValueError('components must be unique comma-separated identifiers')
     if args.environment not in ('dev', 'test'):
         raise ValueError('standalone initialization permits dev/test only')
-    host, separator, port = args.listen.rpartition(':')
-    try:
-        if (not separator or not ipaddress.ip_address(host.strip('[]')).is_loopback
-                or (':' in host and not (host.startswith('[') and host.endswith(']')))
-                or not 1 <= int(port) <= 65535):
-            raise ValueError()
-    except ValueError as error:
-        raise ValueError('listen must be a loopback IP:port') from error
+    if mode == 'server':
+        host, separator, port = args.listen.rpartition(':')
+        try:
+            if (not separator or not ipaddress.ip_address(host.strip('[]')).is_loopback
+                    or (':' in host and not (host.startswith('[') and host.endswith(']')))
+                    or not 1 <= int(port) <= 65535):
+                raise ValueError()
+        except ValueError as error:
+            raise ValueError('listen must be a loopback IP:port') from error
     repository = args.repository.expanduser().resolve(strict=True)
     bare = subprocess.check_output(['git', '-C', str(repository), 'rev-parse',
                                     '--is-bare-repository'], text=True).strip()
@@ -154,17 +158,21 @@ def install(args):
     private_write(prefix / 'etc/deploy.env',
                   '# Deployment/verification credentials only. KEY=value, no shell expansion.\n'
                   '# Synthetic example only: SHIPBRAID_DEMO_ROOT=/absolute/private/demo-environment\n')
-    values = {name: secrets.token_hex(32) for name in ('operator', 'admin')}
-    for name, token in values.items():
-        private_write(prefix / 'etc' / (name + '.token'), token + '\n')
-    private_write(prefix / 'etc/tokens.env', ''.join(
-        f'SHIPBRAID_{name.upper()}_TOKEN={token}\n' for name, token in values.items()))
     quote = lambda value: json.dumps(str(value), ensure_ascii=False)
     config = f'''# Standalone development/test installation. Review scripts before starting.
-listen = {quote(args.listen)}
+mode = "{mode}"
 database_path = {quote(prefix / 'var/coordinator.db')}
-dashboard_dir = {quote(release / 'web')}
 max_active_runs = 2
+'''
+
+    if mode == 'server':
+        values = {name: secrets.token_hex(32) for name in ('operator', 'admin')}
+        for name, token in values.items():
+            private_write(prefix / 'etc' / (name + '.token'), token + '\n')
+        private_write(prefix / 'etc/tokens.env', ''.join(
+            f'SHIPBRAID_{name.upper()}_TOKEN={token}\n' for name, token in values.items()))
+        config += f'''listen = {quote(args.listen)}
+dashboard_dir = {quote(release / 'web')}
 
 [[tokens]]
 id = "{args.project}-operator"
@@ -175,7 +183,9 @@ lanes = ["{lane}"]
 id = "local-administrator"
 token_env = "SHIPBRAID_ADMIN_TOKEN"
 admin = true
+'''
 
+    config += f'''
 [[lanes]]
 id = "{lane}"
 project = "{args.project}"
@@ -202,7 +212,8 @@ args = ["--config", {quote(release / 'adapter.json')}]
 timeout_ms = 20000
 '''
     private_write(prefix / 'etc/config.toml', config)
-    unit = f'''[Unit]
+    if mode == 'server':
+        unit = f'''[Unit]
 Description=Shipbraid standalone request coordinator
 After=network.target
 
@@ -220,7 +231,7 @@ NoNewPrivileges=true
 [Install]
 WantedBy=default.target
 '''
-    private_write(prefix / 'shipbraid.service', unit)
+        private_write(prefix / 'shipbraid.service', unit)
     (prefix / 'bin/shipbraid').symlink_to(release / 'bin/shipbraid')
     # Freeze executable/config/script content. Writable state and credentials live outside.
     for path in release.rglob('*'):
@@ -231,16 +242,27 @@ WantedBy=default.target
             path.chmod(0o555)
     release.chmod(0o555)
     record = {
-        'version': manifest['version'], 'release': str(release), 'prefix': str(prefix),
-        'config': str(prefix / 'etc/config.toml'), 'unit': str(prefix / 'shipbraid.service'),
-        'operator_token_file': str(prefix / 'etc/operator.token'),
+        'version': manifest['version'], 'mode': mode, 'release': str(release),
+        'prefix': str(prefix), 'binary': str(prefix / 'bin/shipbraid'),
+        'config': str(prefix / 'etc/config.toml'),
+        'adapter_config': str(release / 'adapter.json'),
+        'deploy_env': str(prefix / 'etc/deploy.env'),
+        'database': str(prefix / 'var/coordinator.db'),
+        'run_state_dir': str(prefix / 'var/runs'),
+        'work_dir': str(prefix / 'var/work'),
         'lane_id': lane, 'service_started': False, 'deployment_submitted': False,
     }
+    if mode == 'server':
+        record.update({
+            'unit': str(prefix / 'shipbraid.service'),
+            'operator_token_file': str(prefix / 'etc/operator.token'),
+            'admin_token_file': str(prefix / 'etc/admin.token'),
+        })
     private_write(prefix / 'installation.json', json.dumps(record, indent=2) + '\n')
     return record
 
 
-def main():
+def build_parser():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle-root', type=Path, default=Path(__file__).resolve().parent)
     parser.add_argument('--prefix', type=Path, default=Path.home() / '.local/share/shipbraid')
@@ -251,7 +273,15 @@ def main():
     parser.add_argument('--components', default='app')
     parser.add_argument('--project-bundle', type=Path, required=True,
                         help='Reviewed directory containing deploy.sh, verify.py and their dependencies')
-    parser.add_argument('--listen', default='127.0.0.1:8787')
+    parser.add_argument('--mode', choices=('local', 'server'), default='local',
+                        help='local foreground CLI (default) or shared HTTP coordinator')
+    parser.add_argument('--listen', default='127.0.0.1:8787',
+                        help='loopback listener for --mode server')
+    return parser
+
+
+def main():
+    parser = build_parser()
     args = parser.parse_args()
     try:
         print(json.dumps(install(args), indent=2))

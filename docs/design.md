@@ -13,6 +13,7 @@
 - Historical integration record：[外部执行器接入迭代](features/iter-20261016-executor-integration/design.md)（当时的项目环境验收记录；不改变本设计的 M1 验收状态）。
 - Agent iteration：[同团队 Agent 发布闭环](features/iter-20261017-agent-workflow/design.md)（2026-10-17，用户确认固定 local 租户；[验收记录](features/iter-20261017-agent-workflow/verification.md)）。
 - Implementation checkpoint：[首批实现与未完成项](acceptance/m1.md)；设计批准不代表全部 M1 已实现。
+- Usage direction：[单项目前台 CLI 与共享 Server](features/iter-20261017-local-cli/design.md)（2026-10-17，单项目默认 CLI，跨项目或 Dashboard 使用 Server；实施状态以独立计划为准）。
 
 ## 2. Context and Problem
 
@@ -83,13 +84,16 @@ M1 必须完整验收用户的两条核心规则，但只对可控执行器声�
 
 采用 Rust stable、edition 2024，一个 Cargo package。HTTP 用 Axum/Tokio，持久化用 SQLx + SQLite，序列化用 Serde，CLI 用 Clap，结构化日志用 tracing；具体依赖版本和 MSRV 在实现 T-001 时核对并锁定，不在设计中声明已经构建通过。
 
-SQLite 使用 WAL、synchronous=FULL、foreign_keys=ON 和有界 busy_timeout。写操作用短 BEGIN IMMEDIATE 事务；不在事务内等待外部系统。使用规范化数据库路径的操作系统独占锁，第二个 serve 进程直接拒绝启动，不以锁文件存在与否判断所有权。[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[WAL 约束](https://www.sqlite.org/wal.html)。
+SQLite 使用 WAL、synchronous=FULL、foreign_keys=ON 和有界 busy_timeout。写操作用短 BEGIN IMMEDIATE 事务；不在事务内等待外部系统。使用规范化数据库路径的操作系统独占锁，第二个协调器进程（run/serve）直接拒绝启动，不以锁文件存在与否判断所有权。[SQLite 事务](https://www.sqlite.org/lang_transaction.html)、[WAL 约束](https://www.sqlite.org/wal.html)。
+
+0.3.2-dev 的[入口迭代](features/iter-20261017-local-cli/design.md)复用上述内核：单项目由 `run` 前台持有账本、驱动调度并返回请求结果，不监听 HTTP；跨项目、并发提交或 Dashboard 使用 `serve`。两种入口共享数据库独占锁、持久恢复和验收规则，不建立第二套调度状态机。旧配置默认 server，新增 local 配置显式选择单项目信任边界。
 
 不同时支持 PostgreSQL/SQLite 两套实现。需要多实例时再单独迁移数据库和调度所有权协议；单实例不等于仅允许单个调用者。
 
 ~~~mermaid
 flowchart LR
-    C[CLI / Agent / Webhook] --> A[HTTP API]
+    L[单项目前台 CLI] --> S
+    C[Server CLI / Agent / Webhook] --> A[HTTP API · server]
     A --> DB[(SQLite: 请求、执行、命令、事件、证据)]
     DB --> S[Scheduler: 覆盖、合并、抢占]
     S --> E[Executor Adapter]

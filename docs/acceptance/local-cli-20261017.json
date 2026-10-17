@@ -1,0 +1,96 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "status": "passed",
+  "source_version": "0.3.2-dev",
+  "source_base": "fb47109df9c93c9c4f5e5b66f8b415e7ec93ceb1",
+  "rust": {
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "tests": {
+      "library": 70,
+      "cli": 9,
+      "doctor_blackbox": 8,
+      "ledger": 2,
+      "local_cli_blackbox": 9,
+      "total": 98
+    },
+    "debug_build": "passed",
+    "release_build": "passed"
+  },
+  "python_tests": {
+    "package": 7,
+    "installer": 12,
+    "local_adapter": 19,
+    "github_receiver": 11,
+    "total": 49
+  },
+  "acceptance": {
+    "core": {
+      "status": "passed",
+      "checks": 13,
+      "synthetic_only": true,
+      "binary_profile": "debug"
+    },
+    "hooks": {
+      "status": "passed",
+      "checks": 4,
+      "synthetic_only": true,
+      "binary_profile": "debug"
+    },
+    "agents": {
+      "status": "passed",
+      "checks": 8,
+      "synthetic_only": true,
+      "binary_profile": "debug"
+    },
+    "cli": {
+      "status": "passed",
+      "checks": 10,
+      "synthetic_only": true,
+      "binary_profile": "debug"
+    },
+    "distribution": {
+      "status": "passed",
+      "checks": 11,
+      "synthetic_only": true,
+      "binary_profile": "release"
+    }
+  },
+  "distribution_checks": [
+    "packaged doctor checks installed config before service startup without creating a ledger, lock, hook record or deployment marker; runtime checks are skipped by default",
+    "packaged doctor explicitly checks the local user manager and cgroup v2; degraded manager is a warning and no unit is started or stopped",
+    "default local installation creates no coordinator unit or API tokens; doctor passes without opening a ledger or deploying",
+    "packaged local run verifies a synthetic deployment without an HTTP listener or client credentials; replay and resume preserve one dispatch",
+    "installed verified bundle serves CLI/API and prebuilt Dashboard without source toolchains",
+    "coordinator restart during an independent systemd deployment preserves one dispatch and a verified receipt",
+    "packaged request logs retain their run after satisfaction; legacy and explicit run CLI agree and cursors resume without duplicates",
+    "fresh environment verification rejects unhealthy/tampered actual state",
+    "packaged HTTP /hook rejects missing credentials and returns a fresh matching verification receipt",
+    "packaged signed GitHub push receiver rejects bad signatures and deduplicates repeated delivery through the real coordinator",
+    "a nonzero deployment exits under systemd, produces fresh independent stop proof, pauses the lane, and never satisfies the request"
+  ],
+  "bundle": {
+    "file": "shipbraid-0.3.2-dev-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "df6d6995ca6027000df61240fc7ddc9255831381f7de816b2c9480b533e52c2c"
+  },
+  "scope": {
+    "real_project_deployments": 0,
+    "public_release_created": false,
+    "existing_runtime_upgraded": false
+  },
+  "local_assertions": [
+    "local run opens no HTTP listener and ignores client URL/token-file options",
+    "omitted config mode preserves server behavior; new installer defaults local",
+    "single-project lanes, local-cli request principal and exclusive ledger lock",
+    "new local installation creates no API token or coordinator unit",
+    "replay and resume retain original request; conflicting intent is rejected",
+    "zero timeout does not dispatch; pending request resumes with one dispatch",
+    "SIGTERM and timeout await in-flight hook handoff; request is not withdrawn",
+    "Unknown retains ownership and cannot be retried, including when another active run owns the lane",
+    "proven failure requires explicit retry and retains request identity",
+    "historical terminal request results survive unrelated Unknown runs",
+    "errors and reports omit private configuration, hook output and credential canaries",
+    "success requires matching accepted receipt; historical success does not satisfy a new request"
+  ]
+}
