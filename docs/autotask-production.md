@@ -23,7 +23,7 @@ Dashboard 使用原管理身份查看两个环境，地址为 `http://172.168.3.
 
 生产观察器与开发适配器分开配置，执行配置固定管理员审查的完整 Git SHA。生产镜像从 GitHub 的已发布分支导入独立 bare mirror；发布进程还会再次核对目标与审查提交均在 `origin/vibe` 历史内。
 
-持久监督器启动前先记录 request。每个 run/generation 只交接一个独立 systemd user unit，任务在协调器重启后继续运行；已写入 intent 而监督器身份丢失时绝不盲重放。
+适配器保留来自服务进程的 `XDG_RUNTIME_DIR` 与 `DBUS_SESSION_BUS_ADDRESS`，先只读检查用户 systemd 总线，再记录 request 并交接监督器。总线预检失败时不写发布 intent；写入 intent 后的交接异常仍为 unknown，不重放。请求信封不能覆盖这些环境变量。每个 run/generation 只交接一个独立 systemd user unit，任务在协调器重启后继续运行；已写入 intent 而监督器身份丢失时绝不盲重放。
 
 独立进程在自己的审查工具 worktree 中运行：
 
@@ -52,3 +52,13 @@ observe 的 completed 不满足请求。verify 必须重新观察，并与本次
 通用参数声明、HTTP/CLI 格式与脚本读取方式见[项目请求参数](request-parameters.md)。
 
 本机启用记录、必填参数拒绝用例与只读生产健康检查见[生产接入验收](acceptance/production-integration-20261017.json)。已启用生产 lane，尚未提交首个真实三组件发布。
+
+## 未启动交接的维护收敛
+
+`integration/autotask/recover_unstarted.py` 是可选的只读 `failure_observe`，只用于管理员已经封锁的单个未启动交接。找不到 unit 本身不能释放执行所有权。
+
+维护时先禁用生产 admission 并备份账本，在原 `dispatch.lock` 下检查原始 request、执行产物和 worker 进程，然后持久 mask 该 run/generation 的精确 systemd unit。此 mask 必须保留，以拒绝迟到的同名交接。管理员在私有文件中记录完整 `run_id`、`generation`、`unit`、冻结的 `target`、原 request 的 `request_sha256` 和 `fenced_at`。
+
+观察器使用 `--state-dir <原生产运行目录> --recovery-record <私有记录>`，核对 mask 身份、两次稳定的 inactive/dead supervisor 状态、空 cgroup/Job、独占 dispatch 锁、原 request 哈希和身份、无匹配 worker、无日志或结果文件。任何不确定仍返回 unknown。通过时只给出新鲜失败证明，不写 result 或成功 receipt，也不运行发布命令。`failure_observe` 不改变原执行 profile，可先收敛旧所有权，再安装修复后的生产 hooks。
+
+安装新的正常 hooks 会改变执行 profile；旧请求保留原 SHA 和参数，并转为 `needs_attention/lane_configuration_changed`，不能偷偷改写目标配置或自动发布。维护后由请求者重新提交明确版本和必填参数。

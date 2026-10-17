@@ -340,11 +340,25 @@ def hook(envelope, args):
             os.chmod(directory / 'dispatch.lock', 0o600)
             fcntl.flock(lock, fcntl.LOCK_EX)
             fresh = not request_path.exists()
-            if fresh:
-                bridge.atomic_json(request_path, envelope)
-            else:
+            if not fresh:
                 recorded = _read_json(request_path)
                 _validate_recorded(envelope, recorded)
+            try:
+                _preflight_user_bus(tool_path)
+            except Exception:
+                if fresh:
+                    return {**base, 'executor_ref': None, 'status': 'failed',
+                        'environment_known_unchanged': True,
+                        'message': 'User service manager is unavailable; no production intent was created',
+                        'logs': _safe_log_entries(directory)}
+                return {**base, 'status': 'unknown',
+                    'message': 'User service manager is unavailable; the existing production intent will not be replayed',
+                    'logs': _safe_log_entries(directory)}
+            if fresh:
+                # The read-only bus preflight above must succeed before this
+                # durable intent is written. A later systemd-run timeout remains
+                # unknown and keeps this intent so it can never be replayed.
+                bridge.atomic_json(request_path, envelope)
             try:
                 state = bridge.unit_state(unit)
             except Exception:
@@ -369,9 +383,15 @@ def hook(envelope, args):
                     'message': 'A durable production intent exists without an observable supervisor; it will not be replayed',
                     'logs': _safe_log_entries(directory)}
             script = Path(__file__).resolve()
-            _run([
+            worker_environment = _runtime_environment(tool_path)
+            handoff = [
                 'systemd-run', '--user', '--quiet', '--unit', unit,
                 '--setenv=PATH=' + tool_path,
+            ]
+            for key in ('XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS'):
+                if key in worker_environment:
+                    handoff.append('--setenv=' + key + '=' + worker_environment[key])
+            handoff.extend([
                 '--property=Type=exec', '--property=RemainAfterExit=yes',
                 '--property=KillMode=control-group', '--property=UMask=0077',
                 '--property=StandardOutput=append:' + str(log_path),
@@ -380,7 +400,13 @@ def hook(envelope, args):
                 '--repository', str(repository), '--reviewed-release-commit',
                 str(args.reviewed_release_commit), '--tool-path', tool_path,
                 '--worker', str(request_path),
-            ], timeout=20)
+            ])
+            try:
+                _run(handoff, env=worker_environment, timeout=20)
+            except Exception:
+                return {**base, 'status': 'unknown',
+                    'message': 'Production handoff outcome is uncertain; its durable intent will not be replayed',
+                    'logs': _safe_log_entries(directory)}
         return {**base, 'status': 'started',
             'message': 'Production release handed to its durable supervisor',
             'logs': _safe_log_entries(directory)}
@@ -960,13 +986,17 @@ def capture_proof(repository, target, worker_before):
 def _runtime_environment(tool_path=None):
     # Keep only the local toolchain identity and the SSH agent socket. Deployment
     # skips, host/build overrides, tokens, proxies, and arbitrary command hooks
-    # are intentionally absent. Production destinations are explicitly pinned.
+    # are intentionally absent. Trusted user-bus coordinates are retained so
+    # systemctl --user can reach its manager. Production destinations are pinned.
     if tool_path is None:
         tool_path = _ACTIVE_TOOL_PATH
     if tool_path is None:
         raise RuntimeError('administrator-pinned production tool path is required')
     tool_path = _validate_tool_path(tool_path)
-    allowed = ('HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SSH_AUTH_SOCK')
+    allowed = (
+        'HOME', 'TMPDIR', 'LANG', 'LC_ALL', 'SSH_AUTH_SOCK',
+        'XDG_RUNTIME_DIR', 'DBUS_SESSION_BUS_ADDRESS',
+    )
     env = {key: os.environ[key] for key in allowed if key in os.environ}
     env['PATH'] = tool_path
     env.update({
@@ -975,6 +1005,15 @@ def _runtime_environment(tool_path=None):
         'STAGING_WORKER_HOST': WORKER_HOST,
         'WORKER_BUILD_IMAGE': 'rust:1.90-bullseye',
     })
+    return env
+
+
+def _preflight_user_bus(tool_path=None):
+    """Verify the trusted user manager is reachable before creating intent."""
+    env = _runtime_environment(tool_path)
+    if not env.get('XDG_RUNTIME_DIR'):
+        raise RuntimeError('user systemd runtime directory is unavailable')
+    _run(['systemctl', '--user', 'show-environment'], env=env, timeout=5)
     return env
 
 

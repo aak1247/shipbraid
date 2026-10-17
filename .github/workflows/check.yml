@@ -23,6 +23,7 @@ jobs:
       - run: python3 scripts/acceptance-cli.py
       - run: python3 integration/autotask/test_bridge.py
       - run: python3 integration/autotask/test_production.py
+      - run: python3 integration/autotask/test_recover_unstarted.py
       - run: python3 deploy/test_install_local.py
   dashboard:
     runs-on: ubuntu-latest

@@ -5,6 +5,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 from types import SimpleNamespace
 import tempfile
@@ -225,8 +226,13 @@ class ProductionHookTests(unittest.TestCase):
                     'target_parameters': {'database_backup': policy},
                     'database_backup_policy': policy,
                 }}
-                with patch.object(production.bridge, 'unit_state', return_value={
-                        'Id': self.unit, 'LoadState': 'loaded', 'InvocationID': 'job-invocation'}), \
+                with patch.dict(os.environ, {
+                        'XDG_RUNTIME_DIR': str(self.root / 'runtime'),
+                        'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/trusted/user/bus',
+                        'TOKEN': 'must-not-propagate',
+                        'AUTOTASK_SKIP_BUILD': '1'}, clear=False), \
+                        patch.object(production.bridge, 'unit_state', return_value={
+                            'Id': self.unit, 'LoadState': 'loaded', 'InvocationID': 'job-invocation'}), \
                         patch.object(production, '_worker_observation', return_value={
                             'invocation_id': 'worker-before', 'main_pid': 1,
                             'start_ticks': '1', 'executable_sha256': 'a' * 64}), \
@@ -245,6 +251,13 @@ class ProductionHookTests(unittest.TestCase):
                 result = production._read_json(case_dir / 'result.json')
                 self.assertEqual(result['target']['parameters'], {'database_backup': policy})
                 self.assertEqual(result['proof']['core']['database_backup_policy'], policy)
+                worker_environment = execute.call_args.kwargs['env']
+                self.assertEqual(worker_environment['XDG_RUNTIME_DIR'],
+                    str(self.root / 'runtime'))
+                self.assertEqual(worker_environment['DBUS_SESSION_BUS_ADDRESS'],
+                    'unix:path=/trusted/user/bus')
+                self.assertNotIn('TOKEN', worker_environment)
+                self.assertNotIn('AUTOTASK_SKIP_BUILD', worker_environment)
 
     def test_rejects_target_not_on_published_origin_vibe(self):
         with patch.object(production, '_git', side_effect=[self.revision, self.args.reviewed_release_commit]), \
@@ -270,7 +283,9 @@ class ProductionHookTests(unittest.TestCase):
             reply = production.hook(envelope, self.args)
         self.assertEqual(reply['status'], 'started')
         self.assertEqual(reply['executor_ref'], self.unit)
-        start.assert_not_called()
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0],
+            ['systemctl', '--user', 'show-environment'])
 
     def test_missing_supervisor_after_intent_is_unknown_and_never_replayed(self):
         self.write_request()
@@ -279,36 +294,127 @@ class ProductionHookTests(unittest.TestCase):
             reply = production.hook(self.envelope, self.args)
         self.assertEqual(reply['status'], 'unknown')
         self.assertIn('will not be replayed', reply['message'])
-        start.assert_not_called()
+        start.assert_called_once()
+        self.assertEqual(start.call_args.args[0],
+            ['systemctl', '--user', 'show-environment'])
 
     def test_dispatch_uses_pinned_tool_path_without_inheriting_tokens_or_skip_flags(self):
         effective_path = production._validate_tool_path(self.args.tool_path)
         captured = []
 
         def capture_command(argv, **kwargs):
-            captured.append((argv, production._runtime_environment()))
+            captured.append((argv, kwargs['env']))
             return b''
 
         with patch.dict(os.environ, {
                 'PATH': '/untrusted/manager/bin',
+                'XDG_RUNTIME_DIR': '/trusted/runtime',
+                'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/trusted/runtime/bus',
                 'TOKEN': 'must-not-propagate',
                 'AUTOTASK_SKIP_BUILD': '1',
-                'RELEASE_SKIP_ASSET_GATE': '1'}, clear=False), \
+                'RELEASE_SKIP_ASSET_GATE': '1',
+                'K8S_MASTER': 'attacker@invalid',
+                'WORKER_HOST': 'attacker@invalid',
+                'STAGING_WORKER_HOST': 'attacker@invalid',
+                'WORKER_BUILD_IMAGE': 'attacker:latest'}, clear=False), \
                 patch.object(production.bridge, 'unit_state', return_value={
                     'LoadState': 'not-found'}), \
                 patch.object(production, '_run', side_effect=capture_command):
-            reply = production.hook(self.envelope, self.args)
+            hostile = copy.deepcopy(self.envelope)
+            hostile.update({
+                'XDG_RUNTIME_DIR': '/envelope/runtime',
+                'DBUS_SESSION_BUS_ADDRESS': 'tcp:host=envelope.invalid',
+                'environment': {'TOKEN': 'envelope-secret', 'AUTOTASK_SKIP_BUILD': '1'},
+            })
+            reply = production.hook(hostile, self.args)
 
         self.assertEqual(reply['status'], 'started')
-        self.assertEqual(len(captured), 1)
-        argv, child_environment = captured[0]
+        self.assertEqual(len(captured), 2)
+        preflight_argv, preflight_environment = captured[0]
+        self.assertEqual(preflight_argv, ['systemctl', '--user', 'show-environment'])
+        self.assertEqual(preflight_environment['XDG_RUNTIME_DIR'], '/trusted/runtime')
+        self.assertEqual(preflight_environment['DBUS_SESSION_BUS_ADDRESS'],
+            'unix:path=/trusted/runtime/bus')
+        argv, child_environment = captured[1]
         self.assertIn('--setenv=PATH=' + effective_path, argv)
+        self.assertIn('--setenv=XDG_RUNTIME_DIR=/trusted/runtime', argv)
+        self.assertIn('--setenv=DBUS_SESSION_BUS_ADDRESS=unix:path=/trusted/runtime/bus', argv)
         self.assertEqual(child_environment['PATH'], effective_path)
+        self.assertEqual(child_environment['XDG_RUNTIME_DIR'], '/trusted/runtime')
+        self.assertEqual(child_environment['DBUS_SESSION_BUS_ADDRESS'],
+            'unix:path=/trusted/runtime/bus')
         self.assertNotIn('TOKEN', child_environment)
         self.assertNotIn('AUTOTASK_SKIP_BUILD', child_environment)
         self.assertNotIn('RELEASE_SKIP_ASSET_GATE', child_environment)
+        self.assertEqual(child_environment['K8S_MASTER'], production.MASTER_HOST)
+        self.assertEqual(child_environment['WORKER_HOST'], production.WORKER_HOST)
+        self.assertEqual(child_environment['STAGING_WORKER_HOST'], production.WORKER_HOST)
+        self.assertEqual(child_environment['WORKER_BUILD_IMAGE'], 'rust:1.90-bullseye')
         worker_path_index = argv.index('--tool-path')
         self.assertEqual(argv[worker_path_index + 1], effective_path)
+
+    def test_bus_preflight_failure_creates_no_intent_and_does_not_call_systemd(self):
+        with patch.dict(os.environ, {
+                'XDG_RUNTIME_DIR': '/trusted/runtime',
+                'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/trusted/runtime/bus'}, clear=False), \
+                patch.object(production, '_run', side_effect=RuntimeError('bus unavailable')) as run, \
+                patch.object(production.bridge, 'unit_state') as unit_state:
+            reply = production.hook(self.envelope, self.args)
+            preflight_environment = run.call_args.kwargs['env']
+
+        self.assertEqual(reply['status'], 'failed')
+        self.assertIs(reply['environment_known_unchanged'], True)
+        self.assertIsNone(reply['executor_ref'])
+        self.assertFalse((self.directory / 'request.json').exists())
+        unit_state.assert_not_called()
+        run.assert_called_once()
+        self.assertEqual(run.call_args.args[0],
+            ['systemctl', '--user', 'show-environment'])
+        self.assertEqual(run.call_args.kwargs['timeout'], 5)
+        self.assertEqual(preflight_environment['XDG_RUNTIME_DIR'], '/trusted/runtime')
+        self.assertEqual(preflight_environment['DBUS_SESSION_BUS_ADDRESS'],
+            'unix:path=/trusted/runtime/bus')
+        self.assertNotIn('TOKEN', preflight_environment)
+
+    def test_uncertain_systemd_handoff_keeps_intent_and_returns_unknown(self):
+        calls = []
+
+        def fail_handoff(argv, **kwargs):
+            calls.append(argv)
+            if argv[0] == 'systemctl':
+                return b''
+            raise RuntimeError('systemd-run timed out')
+
+        with patch.dict(os.environ, {
+                'XDG_RUNTIME_DIR': '/trusted/runtime',
+                'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/trusted/runtime/bus'}, clear=False), \
+                patch.object(production.bridge, 'unit_state', return_value={
+                    'LoadState': 'not-found'}), \
+                patch.object(production, '_run', side_effect=fail_handoff):
+            reply = production.hook(self.envelope, self.args)
+
+        self.assertEqual(reply['status'], 'unknown')
+        self.assertIn('will not be replayed', reply['message'])
+        self.assertTrue((self.directory / 'request.json').is_file())
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[1][0], 'systemd-run')
+
+    def test_local_userbus_handoff_smoke_with_usr_bin_true(self):
+        if not shutil.which('systemctl') or not shutil.which('systemd-run'):
+            self.skipTest('systemd user tools are unavailable')
+        tool_path = '/usr/bin:/bin'
+        production._activate_tool_path(tool_path)
+        try:
+            production._preflight_user_bus(tool_path)
+        except RuntimeError as error:
+            self.skipTest('no reachable systemd user bus: ' + str(error))
+
+        unit = 'shipbraid-userbus-smoke-' + uuid.uuid4().hex + '.service'
+        production._run([
+            'systemd-run', '--user', '--quiet', '--unit=' + unit,
+            '--setenv=PATH=' + tool_path,
+            '--property=Type=exec', '--wait', '--collect', '/usr/bin/true',
+        ], env=production._runtime_environment(tool_path), timeout=20)
 
     def test_worker_probe_uses_noninteractive_sudo_with_pinned_path(self):
         effective_path = production._activate_tool_path(self.args.tool_path)
@@ -323,7 +429,10 @@ class ProductionHookTests(unittest.TestCase):
             return response
 
         with patch.dict(os.environ, {
-                'PATH': '/untrusted/manager/bin', 'TOKEN': 'must-not-propagate'}, clear=False), \
+                'PATH': '/untrusted/manager/bin',
+                'XDG_RUNTIME_DIR': '/trusted/runtime',
+                'DBUS_SESSION_BUS_ADDRESS': 'unix:path=/trusted/runtime/bus',
+                'TOKEN': 'must-not-propagate'}, clear=False), \
                 patch.object(production, '_run', side_effect=capture_command):
             observation = production._worker_observation()
 
@@ -331,6 +440,9 @@ class ProductionHookTests(unittest.TestCase):
         argv, child_environment = calls[0]
         self.assertIn('sudo -n python3', argv[-1])
         self.assertEqual(child_environment['PATH'], effective_path)
+        self.assertEqual(child_environment['XDG_RUNTIME_DIR'], '/trusted/runtime')
+        self.assertEqual(child_environment['DBUS_SESSION_BUS_ADDRESS'],
+            'unix:path=/trusted/runtime/bus')
         self.assertNotIn('TOKEN', child_environment)
 
     def test_tool_path_rejects_relative_missing_and_empty_components(self):
