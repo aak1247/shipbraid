@@ -1,0 +1,112 @@
+{
+  "date": "2026-10-17",
+  "source_version": "0.3.2-dev",
+  "base_commit": "0c060a0",
+  "implementation_commit": "7e2b89f",
+  "status": "passed",
+  "rust": {
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "library_tests": 56,
+    "cli_tests": 9,
+    "ledger_tests": 2,
+    "debug_build": "passed",
+    "release_build": "passed"
+  },
+  "python_tests": {
+    "packager": 7,
+    "installer": 10,
+    "local_adapter": 19,
+    "github_receiver": 11
+  },
+  "dashboard": {
+    "typecheck": "passed",
+    "tests": 10,
+    "build": "passed"
+  },
+  "protocol_and_bundle": {
+    "scenarios": {
+      "status": "passed",
+      "check_count": 13,
+      "checks": [
+        "unauthenticated reads, cross-lane reads and unauthorized urgent denied",
+        "second process cannot acquire database ownership",
+        "100 concurrent callers share one verified run; idempotency replay/conflict correct",
+        "urgent descendant supersedes stoppable normal run; both requests settle from successor receipt",
+        "CLI logs run/request paginate; request cursor follows successor from its first log; run query stays fixed",
+        "unknown retains ownership; human stop assertion rejected; independent scripted observation restores running",
+        "covered urgent promotes current run; CLI local timeout does not withdraw request",
+        "SIGKILL/restart observes durable scripted execution without creating replacement run",
+        "request logs remain readable after satisfaction and withdrawal without affecting shared runs",
+        "real run logs and monotonic audit cursors readable; explicit drain/resume works",
+        "online SQLite backup/restore retains receipts, idempotency and persistent drain",
+        "executor role enforced; confirmed failure pauses lane; new requests do not unpause; explicit retry preserves target",
+        "failed-request logs remain readable and saved cursor switches to the retried run"
+      ]
+    },
+    "hooks": {
+      "status": "passed",
+      "check_count": 4,
+      "checks": [
+        "HTTP and CLI project/environment selectors resolve separate lanes; lane-scoped token gets 403 across environments",
+        "empty HTTP 202 did not establish Started; later webhook observation and independent synthetic receipt completed the run",
+        "restart performed fresh read-only verification without a second dispatch",
+        "malformed stdout, nonzero command exit, and webhook timeout stay unknown without successful receipts"
+      ]
+    },
+    "agents": {
+      "status": "passed",
+      "check_count": 8,
+      "checks": [
+        "CLI system and lane discovery expose local tenant/capabilities and enforce lane scope",
+        "three concurrent principals retain separate requests and share one run; equivalent selectors/timezones and a new session replay the same task key and creation session",
+        "unlisted peer cannot withdraw/retry/raise priority; frozen collaborator withdraws only its authorized request",
+        "SIGKILL/restart permits task lookup and CLI wait on the original request; remaining peers share one verified receipt and actor audit survives",
+        "task/principal/status filtering and limit-one cursor traversal return all requests without duplicates; invalid queries are 400",
+        "client-selected tenant/principal and unknown, executor, or out-of-scope collaborators are rejected",
+        "admin can promote another owner's request; urgent retry is denied to an ordinary owner/collaborator and succeeds for admin after synthetic failure",
+        "all six persisted entity tables contain only local tenant rows and SQLite integrity is valid"
+      ]
+    },
+    "cli": {
+      "status": "passed",
+      "check_count": 10,
+      "checks": [
+        "HTTP errors preserve public code/status and redact credentials",
+        "Retry-After and retryability are structured",
+        "permanent non-JSON HTTP errors fail without wait retries or body leakage",
+        "wait resumes after transient read errors without submitting work",
+        "unobserved wait ends within local budget with explicit timeout",
+        "zero-second wait preserves one observation and does not cancel",
+        "parameter/local errors stay structured and omit private inputs",
+        "generic parameters cross HTTP unchanged; duplicate keys fail before submission",
+        "ambiguous submit retains original key and never automatically reposts",
+        "help/version retain standard successful text output"
+      ]
+    },
+    "distribution": {
+      "status": "passed",
+      "check_count": 7,
+      "checks": [
+        "installed verified bundle serves CLI/API and prebuilt Dashboard without source toolchains",
+        "coordinator restart during an independent systemd deployment preserves one dispatch and a verified receipt",
+        "packaged request logs retain their run after satisfaction; legacy and explicit run CLI agree and cursors resume without duplicates",
+        "fresh environment verification rejects unhealthy/tampered actual state",
+        "packaged HTTP /hook rejects missing credentials and returns a fresh matching verification receipt",
+        "packaged signed GitHub push receiver rejects bad signatures and deduplicates repeated delivery through the real coordinator",
+        "a nonzero deployment exits under systemd, produces fresh independent stop proof, pauses the lane, and never satisfies the request"
+      ]
+    }
+  },
+  "workspace": {
+    "original_head": "a7f0839196c5a1f1f52b04cfd42329db0cd5835b",
+    "draft_files": 36,
+    "archive_branch": "codex/archive-pending-20261017-095151",
+    "archive_commit": "3bf073265122d7faaf105481f352fb25cbdc0eea",
+    "archive_bytes_verified": true
+  },
+  "new_github_release_created": false,
+  "actual_services_changed": false,
+  "real_project_deployments": 0,
+  "next_iteration": "proposed diagnostics only; no implementation"
+}

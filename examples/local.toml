@@ -9,7 +9,7 @@ cancel_timeout_seconds = 60
 
 [[tokens]]
 id = "local-operator"
-token_env = "AUTO_DELIVER_TOKEN"
+token_env = "SHIPBRAID_TOKEN"
 lanes = ["demo-test"]
 urgent = true
 admin = true
@@ -17,7 +17,7 @@ executor = false
 
 [[tokens]]
 id = "local-executor"
-token_env = "AUTO_DELIVER_EXECUTOR_TOKEN"
+token_env = "SHIPBRAID_EXECUTOR_TOKEN"
 lanes = ["demo-test"]
 executor = true
 

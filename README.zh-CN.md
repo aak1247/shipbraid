@@ -50,7 +50,7 @@ Shipbraid 协调发布请求，具体构建与部署由各项目使用自己的�
 
 ## 快速开始：使用二进制
 
-从 [GitHub Releases](https://github.com/aak1247/shipbraid/releases) 下载已发布版本的 Linux x86_64 GNU 发行包和 `.sha256`，校验后解压。发行包包含 CLI、服务端、构建好的 Dashboard、适配器和安装器，运行无需 Rust 或 Node.js。首次公开发行需由维护者完成 tag 和 Release 发布；具体版本以 Releases 页面为准。
+从 [GitHub Releases](https://github.com/aak1247/shipbraid/releases) 下载已发布版本的 Linux x86_64 GNU 发行包和 `.sha256`，校验后解压。发行包包含 CLI、服务端、构建好的 Dashboard、适配器和安装器，运行无需 Rust 或 Node.js。具体版本以 Releases 页面为准；当前已发布二进制发行包为 v0.3.1。
 
 ```bash
 # 文件名以下载的版本为准；以下以 0.3.1 为例。
@@ -87,7 +87,7 @@ Dashboard 由同一服务提供，默认打开 `http://127.0.0.1:8787`，输入�
 
 ## Agent 使用
 
-[Agent 使用指南](docs/agents.md)包含身份配置、目标发现、任务恢复、结构化 CLI 错误和协作权限。当前租户由服务端固定为 `local`。
+[Agent 使用指南](docs/agents.md)包含项目接入前提、目标发现、身份配置、CLI 命令参考、任务恢复、结构化错误和协作权限。当前租户由服务端固定为 `local`。安装 CLI 不会自动注册仓库：维护者先按[项目接入指南](docs/project-integration.md)配置，再把实际服务地址、lane、组件和发布步骤写入项目的 `AGENTS.md`。
 
 ## 接入执行器
 

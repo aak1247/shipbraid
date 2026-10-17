@@ -168,15 +168,17 @@ python3 "$SHIPBRAID_BUNDLE/adapters/github/receiver.py" --config /private/path/g
 
 新安装器不负责存量升级，也不能用新空目录替换有活动执行的实例。升级需按已有维护流程：
 
-1. 用管理员身份 `shipbraid drain`，等待并核对所有活动 run 已结算；unknown 继续保留所有权，不靠超时或杀进程解锁。
+1. 记录原 drain 状态，再用管理员身份 `shipbraid drain`。核对未结执行和命令交接；只有所有命令已确认、run 处于 Running/Deploying、执行器由独立 supervisor 管理且不在协调器 cgroup 内时，才可保留该执行并只重启协调器。否则等待相应操作结算。Unknown 保留原所有权，不能当作 stopped 或按超时解锁。
 2. 用 SQLite 在线备份 API 做一致备份，保存配置、token 引用、镜像、任务目录、当前版本及所有冻结 hook 路径。不要只复制活动中的单个 `.db` 文件。
 3. 停止协调器，解压并校验新发行包到**新的版本目录**。保持同一个数据库、lane 身份和旧执行器路径。停止协调器不会停止独立任务。
 4. 更新服务使用的新二进制和 Dashboard 路径，旧 release 和项目适配器继续保留。变更适配器/profile 时单独验证，不在旧目录原地修改。
-5. 启动后检查 `system`、lane、未结请求及所有权、环境和鉴权，再 `shipbraid resume`。
+5. 启动后检查 `system`、lane、未结请求、参数/配置指纹、鉴权和 Dashboard；若保留了活动执行，逐项核对其 executor_ref、generation 及 supervisor 的 PID/InvocationID/cgroup。恢复维护前的 drain 状态；原本未 drain 时才执行 `shipbraid resume`。
+
+drain 只阻止新 dispatch，仍会继续 Observe，必要时执行 Verify/failure_observe；在私有数据库副本上启动新服务也会调用配置的 hooks。副本启动验证必须隔离真实网络、systemd bus 和可写项目状态，不能只把数据库复制一份就当作无副作用演练。
 
 数据库发生迁移后不能保证旧二进制可读；回退前检查 schema 兼容与备份方案。恢复或替换数据前仍须核对独立执行器，防止回退账本丢失实际部署。旧名称安装另见[升级说明](naming.md)。
 
-## 维护者：源码构建和首次发行
+## 维护者：源码构建与发行
 
 下面是维护者工作流，普通使用者无需执行。先通过 Rust/前端检查，构建后生成发行包：
 
@@ -185,8 +187,9 @@ cargo build --release --locked
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
 python3 scripts/package-release.py
+SHIPBRAID_BUILD_VERSION="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
 python3 scripts/acceptance-distribution.py \
-  --bundle target/dist/shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz
+  --bundle "target/dist/shipbraid-${SHIPBRAID_BUILD_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 ```
 
 本地包使用本机 ABI；本地验收不等同于官方 Ubuntu 22.04 runner 验收。工作树须完成审查和提交后，再对与 Cargo 版本一致的提交创建 `v<version>` tag，并按项目发布权限推送。Release workflow 会重新检查、构建、验证包并生成 **draft Release**。维护者检查工件后手动发布；不会把未提交修改作为公开 tag 的发行来源。

@@ -50,7 +50,7 @@ Shipbraid coordinates release requests while each project keeps its own build an
 
 ## Quick start: use a binary
 
-Download a published Linux x86_64 GNU bundle and its `.sha256` file from [GitHub Releases](https://github.com/aak1247/shipbraid/releases), verify, and unpack. The bundle includes the CLI/server, prebuilt dashboard, adapters, and installer; users need neither Rust nor Node.js. Maintainers must tag and publish the first public Release before downloads become available; use the version shown on the Releases page.
+Download a published Linux x86_64 GNU bundle and its `.sha256` file from [GitHub Releases](https://github.com/aak1247/shipbraid/releases), verify, and unpack. The bundle includes the CLI/server, prebuilt dashboard, adapters, and installer; users need neither Rust nor Node.js. Use the version shown on the Releases page; v0.3.1 is the current published binary bundle.
 
 ```bash
 # Use the version you downloaded; 0.3.1 is shown here.
@@ -87,7 +87,7 @@ The same service serves the dashboard at `http://127.0.0.1:8787` by default. Ent
 
 ## For agents
 
-Use [the Agent guide](docs/agents.md) for identity setup, target discovery, task recovery, structured CLI errors, and collaboration permissions. The server currently fixes the tenant to `local`.
+Use [the Agent guide](docs/agents.md) for project prerequisites, target discovery, identity setup, the CLI reference, task recovery, structured errors, and collaboration permissions. The server currently fixes the tenant to `local`. Installing the CLI does not register a repository: maintainers first follow the [project integration guide](docs/project-integration.md), then record the team's service URL, lane, components, and publishing steps in the project's `AGENTS.md`.
 
 ## Connect an executor
 

@@ -240,7 +240,7 @@ repository/profile/环境由 lane 配置派生，客户端不能替换。JSON �
 
 统一错误包含 code、message、retryable、request_id（若已创建）。主要错误：idempotency_conflict、target_not_allowed、lineage_unproven、forbidden、lane_blocked、not_retryable、deadline_elapsed。提交时遇到当前 lane 被阻塞仍可持久接纳请求并回显 blocked_reason；非法目标/无权限不创建请求。默认请求正文上限 16 KiB、reason 上限 2 KiB、每 lane 非终态请求上限 1000；幂等重试优先查已有请求，新增超限返回 429 和 Retry-After，不创建丢失归属的半请求。
 
-CLI 只调用服务端 API：serve、submit、wait、inspect request/run/lane、withdraw、retry、priority、resolve-unknown、drain。M1 wait 使用有界轮询与退避，事件接口用于审计；不额外建设 SSE/WebSocket/回调通知系统。wait satisfied 返回 0；needs_attention/expired/withdrawn/客户端超时分别给不同退出码（拟议 2/3/4/124）。
+CLI 通过服务端 API 提交和查询：submit、wait、inspect/list request/run/lane、logs run/request、events、system、health、withdraw、retry、priority、resolve-unknown、drain/resume；serve 用于启动服务。请求日志绑定所选 run，换 run 时重置游标，不合并不同执行的日志；原有 logs RUN_ID 调用仍兼容。完整用法见 [Agent 指南](agents.md)。M1 wait 使用有界轮询与退避，事件接口用于审计；不额外建设 SSE/WebSocket/回调通知系统。wait satisfied 返回 0；needs_attention/expired/withdrawn/客户端超时分别给不同退出码（2/3/4/124）。
 
 ### 7.9 Rust 模块与执行器边界
 
