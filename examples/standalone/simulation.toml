@@ -1,0 +1,24 @@
+# ScriptedExecutor: synthetic phases and receipts; never deploys an application.
+# Copy beside data/source.git and a web symlink pointing to the bundle's web/.
+listen = "127.0.0.1:8787"
+database_path = "data/simulation.db"
+dashboard_dir = "web"
+
+[[tokens]]
+id = "demo-operator"
+token_env = "SHIPBRAID_TOKEN"
+lanes = ["demo-test"]
+admin = true
+urgent = true
+
+[[lanes]]
+id = "demo-test"
+project = "demo"
+environment = "test"
+repository_id = "demo"
+repository_path = "data/source.git"
+release_ref = "refs/heads/main"
+profile_digest = "synthetic-v1"
+components = ["app"]
+allow_descendant = false
+allow_preemption = false

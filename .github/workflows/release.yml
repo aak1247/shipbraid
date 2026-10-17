@@ -1,0 +1,163 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: read
+
+jobs:
+  build-and-package:
+    name: Build, check, and package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify tag and runner target
+        shell: bash
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo version $version" >&2
+            exit 1
+          }
+          test "$(uname -m)" = "x86_64"
+
+      - uses: dtolnay/rust-toolchain@1.94.0
+        with:
+          components: rustfmt, clippy
+
+      - name: Check Rust toolchain
+        run: |
+          rustc --version
+          rustc -vV | grep -Fx 'host: x86_64-unknown-linux-gnu'
+
+      - name: Rust formatting
+        run: cargo fmt --all --check
+
+      - name: Rust lint
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: Rust tests
+        run: cargo test --locked
+
+      - name: Build Linux GNU binary
+        run: cargo build --locked --release
+
+      - name: Verify coordinator and client contracts
+        run: |
+          python3 scripts/acceptance.py --binary target/release/shipbraid
+          python3 scripts/acceptance-hooks.py --binary target/release/shipbraid
+          python3 scripts/acceptance-agents.py --binary target/release/shipbraid
+          python3 scripts/acceptance-cli.py --binary target/release/shipbraid
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.24.0
+
+      - name: Install dashboard dependencies
+        working-directory: web
+        run: pnpm install --frozen-lockfile
+
+      - name: Check dashboard types and tests
+        working-directory: web
+        run: |
+          pnpm typecheck
+          pnpm test
+
+      - name: Build dashboard
+        working-directory: web
+        run: pnpm build
+
+      - name: Test release packager
+        run: python3 -m unittest discover -s scripts -p 'test_package_release.py' -v
+
+      - name: Test standalone local adapter
+        run: python3 -m unittest discover -s integration/local -p 'test_*.py' -v
+
+      - name: Test GitHub receiver
+        run: python3 -m unittest discover -s integration/github -p 'test_*.py' -v
+
+      - name: Test standalone installer
+        run: python3 -m unittest discover -s deploy -p 'test_install_standalone.py' -v
+
+      - name: Prepare systemd user manager for isolated acceptance
+        shell: bash
+        run: |
+          sudo loginctl enable-linger "$USER"
+          uid="$(id -u)"
+          sudo systemctl start "user@${uid}.service"
+          runtime_dir="/run/user/${uid}"
+          bus_address="unix:path=${runtime_dir}/bus"
+          echo "XDG_RUNTIME_DIR=${runtime_dir}" >> "$GITHUB_ENV"
+          echo "DBUS_SESSION_BUS_ADDRESS=${bus_address}" >> "$GITHUB_ENV"
+          export XDG_RUNTIME_DIR="$runtime_dir"
+          export DBUS_SESSION_BUS_ADDRESS="$bus_address"
+          test "$(stat -fc %T /sys/fs/cgroup)" = cgroup2fs
+          systemctl --user show-environment >/dev/null
+
+      - name: Package and validate release bundle
+        run: |
+          python3 scripts/package-release.py --target x86_64-unknown-linux-gnu
+          python3 scripts/acceptance-distribution.py --bundle target/dist/*.tar.gz --report target/dist/acceptance.json
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: shipbraid-${{ github.ref_name }}-linux-x86_64-gnu
+          path: target/dist/*
+          if-no-files-found: error
+          retention-days: 14
+
+  draft-release:
+    name: Create draft GitHub Release
+    needs: build-and-package
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Verify tag matches Cargo package version
+        shell: bash
+        run: |
+          version="$(python3 -c 'import tomllib; print(tomllib.load(open("Cargo.toml", "rb"))["package"]["version"])')"
+          test "$GITHUB_REF_NAME" = "v$version" || {
+            echo "tag $GITHUB_REF_NAME does not match Cargo version $version" >&2
+            exit 1
+          }
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: shipbraid-${{ github.ref_name }}-linux-x86_64-gnu
+          path: target/dist
+
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          cat > release-notes.md <<'NOTES'
+          Linux x86_64 GNU release.
+
+          Download the tar.gz bundle and its .sha256 sidecar, then verify the checksum before unpacking. See the bundled docs/distribution.md for installation and compatibility details.
+
+          This release is a draft. Review and publish it manually after checking the artifacts.
+          NOTES
+          gh release create "$GITHUB_REF_NAME" target/dist/*.tar.gz target/dist/*.sha256 target/dist/acceptance.json \
+            --draft --verify-tag --title "$GITHUB_REF_NAME" --notes-file release-notes.md
