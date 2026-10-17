@@ -125,7 +125,7 @@ shipbraid --json priority REQUEST_ID urgent --reason "incident fix"
 
 ## 机器输出与退出码
 
-成功命令输出 JSON。`--json` 模式下，HTTP、网络、本地配置、参数错误也在 stdout 输出：
+API 成功命令输出 JSON；本机 `doctor` 默认输出文本，带 `--json` 输出诊断报告。`--json` 模式下，HTTP、网络、本地配置、参数错误也在 stdout 输出：
 
 ```json
 {"error":{"code":"forbidden","message":"The configured token is not authorized for this operation.","retryable":false,"http_status":403}}
@@ -160,18 +160,19 @@ shipbraid --version
 
 | 全局选项 | 环境变量 | 默认值与说明 |
 | --- | --- | --- |
-| `--json` | 无 | 成功响应本来就是 JSON；启用后，参数、配置、HTTP 和网络错误也写成 stdout 上的结构化 JSON。help/version 仍输出文本 |
+| `--json` | 无 | API 成功响应本来就是 JSON；doctor 启用后输出 JSON 报告；启用后，参数、配置、HTTP 和网络错误也写成 stdout 上的结构化 JSON。help/version 仍输出文本 |
 | `--url <URL>` | `SHIPBRAID_URL` | `http://127.0.0.1:8787`；远程服务必须用 HTTPS，HTTP 只允许 loopback；不接受 URL 用户名/密码、query 或 fragment |
 | `--token <TOKEN>` | `SHIPBRAID_TOKEN` | API bearer token；建议用 token 文件，避免令牌进入 shell 历史 |
 | `--token-file <PATH>` | `SHIPBRAID_TOKEN_FILE` | 读取文本文件并去掉首尾空白；与命令行或环境中的 `--token` / `SHIPBRAID_TOKEN` 互斥 |
 | `-h, --help` | 无 | 显示当前命令帮助，不访问服务端 |
 | `-V, --version` | 无 | 显示 CLI 版本，不访问服务端 |
 
-全局选项可放在子命令前后。命令行值优先于环境变量。除 `serve`、`health` 和 help/version 外，API 命令需要 token。通常返回 15 秒后超时；`wait` 另有本地等待期限。
+全局选项可放在子命令前后。命令行值优先于环境变量。`doctor`、`serve`、`health` 和 help/version 无需客户端 token；其他 API 命令需要 token。通常返回 15 秒后超时；`wait` 另有本地等待期限。
 
 | 命令 | 用途 | 权限边界 |
 | --- | --- | --- |
 | `serve` | 按配置启动持久协调器 | 服务配置和执行器访问权限 |
+| `doctor` | 本机只读前提检查，详见[诊断指南](diagnostics.md)；0.3.2-dev 新增，v0.3.1 无此命令 | 本机配置和服务凭据环境，无需客户端身份 |
 | `submit` | 创建不可变发布请求 | 目标 lane；urgent 还需 urgent/admin 能力 |
 | `wait` | 轮询一个请求 | 对应 lane 的读取权限 |
 | `inspect` / `list` | 查询 request、run、lane | token 可访问的 lane 范围 |

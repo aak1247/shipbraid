@@ -64,6 +64,8 @@ shipbraid --version
 
 第一次体验可直接按[本地模拟](docs/distribution.md#本地模拟)启动二进制和内置 Dashboard，不部署真实应用。需要发布自己的项目时，维护者先按[二进制安装与接入](docs/distribution.md#首次接入自己的项目)注册受信仓库、部署脚本和独立验收脚本。安装器和本机适配器需要 Python **3.11+**；本机任务由 systemd user manager 独立托管。安装本身不会启动服务或发布应用。
 
+源码版本 0.3.2-dev 新增供实例维护者使用的只读 `shipbraid doctor --config PATH`，详见[诊断指南](docs/diagnostics.md)。已发布的 v0.3.1 发行包尚无此命令。
+
 项目已接入时，开发者只需团队提供的服务地址、token 文件和通道配置：
 
 ```bash

@@ -1,0 +1,84 @@
+{
+  "schema_version": 1,
+  "date": "2026-10-17",
+  "status": "passed",
+  "source_version": "0.3.2-dev",
+  "source_base": "dc6d87271e362d445118a96a767a91e5e0db1dea",
+  "rust": {
+    "fmt": "passed",
+    "clippy_all_targets_deny_warnings": "passed",
+    "tests": {
+      "library": 64,
+      "cli": 9,
+      "doctor_blackbox": 8,
+      "ledger": 2,
+      "total": 83
+    },
+    "debug_build": "passed",
+    "release_build": "passed"
+  },
+  "python_tests": {
+    "package": 7,
+    "installer": 10,
+    "local_adapter": 19,
+    "github_receiver": 11,
+    "total": 47
+  },
+  "acceptance": {
+    "core": {
+      "status": "passed",
+      "checks": 13,
+      "synthetic_only": true
+    },
+    "hooks": {
+      "status": "passed",
+      "checks": 4,
+      "synthetic_only": true
+    },
+    "agents": {
+      "status": "passed",
+      "checks": 8,
+      "synthetic_only": true
+    },
+    "cli": {
+      "status": "passed",
+      "checks": 10,
+      "synthetic_only": true
+    },
+    "distribution": {
+      "status": "passed",
+      "checks": 9,
+      "synthetic_only": true
+    }
+  },
+  "distribution_checks": [
+    "packaged doctor checks installed config before service startup without creating a ledger, lock, hook record or deployment marker; runtime checks are skipped by default",
+    "packaged doctor explicitly checks the local user manager and cgroup v2; degraded manager is a warning and no unit is started or stopped",
+    "installed verified bundle serves CLI/API and prebuilt Dashboard without source toolchains",
+    "coordinator restart during an independent systemd deployment preserves one dispatch and a verified receipt",
+    "packaged request logs retain their run after satisfaction; legacy and explicit run CLI agree and cursors resume without duplicates",
+    "fresh environment verification rejects unhealthy/tampered actual state",
+    "packaged HTTP /hook rejects missing credentials and returns a fresh matching verification receipt",
+    "packaged signed GitHub push receiver rejects bad signatures and deduplicates repeated delivery through the real coordinator",
+    "a nonzero deployment exits under systemd, produces fresh independent stop proof, pauses the lane, and never satisfies the request"
+  ],
+  "bundle": {
+    "file": "shipbraid-0.3.2-dev-x86_64-unknown-linux-gnu.tar.gz",
+    "sha256": "0ca8cd236afd8092754f3385604c7d6ab36b062859acc7195606b4c261b26c4e"
+  },
+  "scope": {
+    "real_project_deployments": 0,
+    "public_release_created": false,
+    "existing_runtime_upgraded": false
+  },
+  "doctor_assertions": [
+    "text and JSON reports; exit codes 0/1/2",
+    "configuration and credential canaries absent from stdout and stderr",
+    "configured commands, interpreters, scripts and PATH-supplied probe sentinels never executed",
+    "inherited Git overrides ignored",
+    "absent database parent remains absent; existing invalid SQLite file unchanged; no ledger sidecars or lock",
+    "configuration and mirror contents unchanged",
+    "runtime probes skipped by default; explicit systemd/cgroup checks in packaged acceptance",
+    "probe stdout limit and timeout; included promisor configuration blocks release-ref probing"
+  ]
+}

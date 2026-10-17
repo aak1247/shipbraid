@@ -1,5 +1,6 @@
 pub mod api;
 pub mod config;
+pub mod diagnostics;
 pub mod domain;
 pub mod engine;
 pub mod executor;

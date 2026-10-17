@@ -103,6 +103,22 @@ def stop_process(process):
         process.wait(timeout=20)
 
 
+def tree_snapshot(directory):
+    snapshot = {}
+    for path in sorted(directory.rglob('*')):
+        relative = path.relative_to(directory).as_posix()
+        if path.is_symlink():
+            snapshot[relative] = ('symlink', os.readlink(path))
+        elif path.is_dir():
+            snapshot[relative] = ('directory', path.stat().st_mtime_ns)
+        elif path.is_file():
+            metadata = path.stat()
+            snapshot[relative] = ('file', metadata.st_mtime_ns, hashlib.sha256(path.read_bytes()).hexdigest())
+        else:
+            snapshot[relative] = ('other',)
+    return snapshot
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--bundle', type=Path, required=True)
@@ -186,6 +202,39 @@ def main():
             return 'MainPID=0' in state and ('SubState=exited' in state or 'SubState=failed' in state)
 
         try:
+            # Doctor must inspect the installed config before any server owns or
+            # creates its database. It must not start configured hooks or deploy.
+            config_path = prefix / 'etc/config.toml'
+            database = prefix / 'var/coordinator.db'
+            config_before = config_path.read_bytes()
+            mirror_before = tree_snapshot(mirror)
+            doctor = cli('doctor', '--config', str(config_path))
+            assert doctor['schema_version'] == 1 and doctor['ok'], doctor
+            assert doctor['summary']['failed'] == 0, doctor['summary']
+            assert doctor['summary']['skipped'] > 0, doctor['summary']
+            runtime_checks = {check['code']: check['status'] for check in doctor['checks']
+                              if check['code'] in ('runtime.user_systemd', 'runtime.cgroup_v2')}
+            assert runtime_checks == {
+                'runtime.user_systemd': 'skipped', 'runtime.cgroup_v2': 'skipped'}, runtime_checks
+            assert sum(doctor['summary'][key] for key in
+                       ('passed', 'warnings', 'failed', 'skipped')) == len(doctor['checks'])
+            local_doctor = cli('doctor', '--config', str(config_path), '--check-local-runtime')
+            assert local_doctor['ok'] and local_doctor['summary']['failed'] == 0, local_doctor
+            local_checks = {check['code']: check['status'] for check in local_doctor['checks']
+                            if check['code'].startswith('runtime.')}
+            assert local_checks['runtime.user_systemd'] in ('pass', 'warn'), local_checks
+            assert local_checks['runtime.cgroup_v2'] == 'pass', local_checks
+            assert config_path.read_bytes() == config_before
+            assert tree_snapshot(mirror) == mirror_before
+            assert not database.exists()
+            assert not Path(str(database) + '.lock').exists()
+            assert not any(Path(str(database) + suffix).exists()
+                           for suffix in ('-wal', '-shm', '-journal'))
+            assert list((prefix / 'var/runs').iterdir()) == []
+            assert not (demo / 'deployment-starts').exists()
+            report['checks'].append('packaged doctor checks installed config before service startup without creating a ledger, lock, hook record or deployment marker; runtime checks are skipped by default')
+            report['checks'].append('packaged doctor explicitly checks the local user manager and cgroup v2; degraded manager is a warning and no unit is started or stopped')
+
             service = start_service()
             assert cli('system')['api_version'] == '1'
             with urllib.request.urlopen(url, timeout=5) as response:

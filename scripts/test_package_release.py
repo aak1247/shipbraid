@@ -34,6 +34,7 @@ class PackageReleaseTests(unittest.TestCase):
         self._write("integration/github/README.md", "# GitHub receiver\n")
         for name in (
             "distribution.md",
+            "diagnostics.md",
             "hooks.md",
             "project-integration.md",
             "api.md",

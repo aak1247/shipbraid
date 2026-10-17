@@ -12,7 +12,7 @@ use std::{
 #[derive(Parser)]
 #[command(version, about = "发布请求协调器")]
 struct Cli {
-    /// Emit structured JSON errors for agent callers; successes are always JSON.
+    /// Emit structured JSON errors and doctor reports; API successes are JSON.
     #[arg(long, global = true)]
     json: bool,
     #[arg(
@@ -36,6 +36,15 @@ struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Check local prerequisites without opening the ledger or executing hooks.
+    Doctor {
+        /// Local coordinator TOML configuration, resolved like `serve --config`.
+        #[arg(long)]
+        config: PathBuf,
+        /// Also check the local adapter's user systemd and cgroup prerequisites.
+        #[arg(long)]
+        check_local_runtime: bool,
+    },
     /// Start the durable coordinator with configured executors.
     Serve {
         #[arg(long)]
@@ -577,6 +586,20 @@ async fn main() -> std::process::ExitCode {
 
 async fn run(cli: Cli) -> Result<u8> {
     cli.validate()?;
+    if let Command::Doctor {
+        config,
+        check_local_runtime,
+    } = &cli.command
+    {
+        let report = shipbraid::diagnostics::diagnose(config, *check_local_runtime).await;
+        let code = if report.ok { 0 } else { 1 };
+        if cli.json {
+            output(&serde_json::to_value(report)?)?;
+        } else {
+            println!("{}", report.to_text());
+        }
+        return Ok(code);
+    }
     if let Command::Serve { config } = &cli.command {
         shipbraid::service::serve(shipbraid::config::Config::load(config)?).await?;
         return Ok(0);
@@ -592,7 +615,7 @@ async fn run(cli: Cli) -> Result<u8> {
     };
     let api = Api::new(&cli.url, token)?;
     let value = match cli.command {
-        Command::Serve { .. } => unreachable!(),
+        Command::Serve { .. } | Command::Doctor { .. } => unreachable!(),
         Command::Submit {
             lane,
             project,

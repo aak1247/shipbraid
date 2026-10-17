@@ -160,6 +160,14 @@ fn default_enabled() -> bool {
 }
 impl Config {
     pub fn load(path: &Path) -> Result<Self> {
+        let config = Self::load_unvalidated(path)?;
+        config.validate()?;
+        Ok(config)
+    }
+
+    /// Resolve configuration references for offline diagnostics. Runtime callers
+    /// must continue using `load`, which also enforces semantic validation.
+    pub(crate) fn load_unvalidated(path: &Path) -> Result<Self> {
         let path = path
             .canonicalize()
             .context("cannot resolve configuration path")?;
@@ -215,7 +223,6 @@ impl Config {
                 }
             }
         }
-        config.validate()?;
         Ok(config)
     }
     pub fn validate(&self) -> Result<()> {

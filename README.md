@@ -64,6 +64,8 @@ shipbraid --version
 
 For a first look, follow the [binary simulation walkthrough](docs/distribution.md#本地模拟). It starts the coordinator and bundled dashboard without deploying an application. For your own project, a maintainer first [installs and configures the project](docs/distribution.md#首次接入自己的项目), including a trusted mirror, deployment scripts, and independent verification. The installer/local adapter requires Python **3.11+**; local jobs run under an independent systemd user manager. Installation does not start services or submit deployments.
 
+Source version 0.3.2-dev also provides a read-only `shipbraid doctor --config PATH` prerequisite check for instance maintainers; see the [diagnostics guide](docs/diagnostics.md). The published v0.3.1 bundle does not include this command.
+
 Once the project is connected, developers need only the team's service URL, token file, and registered target:
 
 ```bash
