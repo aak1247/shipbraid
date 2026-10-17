@@ -18,7 +18,7 @@ Shipbraid 删除专属适配/安装/LAN unit，更新相关文档和检查；通
 - Details: 从最新已提交版本迁入专属适配器、恢复器和测试；维护指南，显式提交并 push vibe。
 - Range: AutoTask scripts/shipbraid、docs/guides/auto-deliver.md、必要 AGENTS 部署段与 package.json 测试入口。
 - Dependencies: 已核对两个仓库状态；Risk: 不触碰前端 WIP，不部署。
-- Evidence: AutoTask `4b7ea9140`（迁入）、`3b778ff21`（文档），最终 `vibe=3cf03a7c2` 已推送且远端一致；51 个适配器测试 + 8 个客户端测试通过。
+- Evidence: AutoTask `4b7ea9140`（迁入）、`3b778ff21`（文档），迁入批次的 `vibe=3cf03a7c2` 已推送且远端一致；51 个适配器测试 + 8 个客户端测试通过。后续发行包/实际升级指南为 `0e2d14fe2`、`68ed1956f`，执行与请求术语修正 `2e15ff085`；均已推送 vibe。
 - Completion: [x] 测试通过；[x] vibe推送且其他会话改动保留。
 
 ### T-002 — Shipbraid 去耦与发行整合
