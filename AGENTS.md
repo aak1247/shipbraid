@@ -2,8 +2,8 @@
 
 ## 项目边界
 
-- 独立 Rust 项目；不依赖 AutoTask 的数据库、运行时、内部服务或业务实体。
-- 当前支持本地模拟和受控 hooks；只有通过验证的能力才能标为已实现。真实环境必须有明确用户授权，首个接入为 AutoTask 本机开发环境，生产默认禁用；见 docs/features/iter-20261016-executor-integration/。
+- 独立 Rust 项目；不依赖任何接入项目的数据库、运行时、内部服务或业务实体。
+- 当前支持本地模拟和管理员配置的 hooks；只有通过验证的能力才能标为已实现。真实环境接入必须有明确用户授权，生产 lane 默认禁用；见 [外部执行器协议](docs/hooks.md) 和 [本机适配器说明](integration/local/README.md)。
 - 领域和范围以 docs/design.md、docs/execution-plan.md 为准。
 - 默认使用一个 Cargo package 按模块组织；没有证据前不拆微服务或多 crate。
 

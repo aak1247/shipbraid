@@ -17,7 +17,7 @@
 
 允许范围：本仓库 Cargo 工程、src、migrations、tests、配置样例、文档及本项目自身质量检查。一个 package、一个服务、SQLite、HTTP/CLI、受控本地 Git 关系证明、ScriptedExecutor 和 React/TypeScript/Tailwind 只读 Dashboard。
 
-排除范围：AutoTask 代码/数据库、真实 GitHub Actions 调度、真实生产部署、集群/SSH/Harbor 凭据配置、多实例 HA、通用 DAG、自动 rollback 和多个执行器同时接入。
+排除范围：接入项目代码/数据库、真实 GitHub Actions 调度、真实生产部署、集群/SSH/镜像仓库凭据配置、多实例 HA、通用 DAG、自动 rollback 和多个执行器同时接入。
 
 范围变更规则：改变 coverage、lane 原子边界、状态终态、停止证明、权限或失败重试策略，先同步设计和场景矩阵并重新过评审；不在实现中默默增加“更智能”的默认行为。
 
@@ -159,7 +159,7 @@
 - Linked requirements：FR-001～FR-012、NFR-001～NFR-005。
 - Objective：证明交付的 M1 是可恢复调度内核，并准确说明它尚未接真实生产。
 - Task details：跑通设计 §10 全场景；属性测试和数据库并发；独立进程故障注入；负载采样；在线备份/恢复；drain 与返回旧发布入口演练；整理复现步骤和本项目质量检查。
-- Implementation requirements：记录运行提交、硬件/磁盘参数、SQLite 版本、命令及结果；不把单元 mock 通过当作真实 GitHub/生产验收；仅执行本项目相关检查，不构建 AutoTask 三入口。
+- Implementation requirements：记录运行提交、硬件/磁盘参数、SQLite 版本、命令及结果；不把单元 mock 通过当作真实 GitHub/生产验收；仅执行本项目相关检查，不构建下游应用的发布入口。
 - Allowed modification range：tests/scenarios、tests/load、配置/运行示例、docs/acceptance、本项目 .github/workflows 质量检查。
 - Dependencies：T-001～T-007。
 - Risks/notes：性能目标未达需如实记录并评审原因；不能省略失败注入以换取绿色报告。

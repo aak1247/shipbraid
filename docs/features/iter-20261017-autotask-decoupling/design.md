@@ -1,0 +1,72 @@
+# 项目适配层迁出与 GitHub Release 切换
+
+## 1. Document Control
+
+- Version: 1; Author / Reviewer: Codex（同会话自审）
+- Date: 2026-10-17; Status: APPROVED; Review gate: PASS（§13）
+- Plan: [execution-plan.md](execution-plan.md)
+
+## 2. Context and Problem
+
+用户要求清除 Shipbraid Git 中 AutoTask 专用代码，并将 AutoTask 实际使用的协调器切换到 GitHub Release。现有服务为本机 `auto-deliver.service`，同一账本包含 dev/prod，生产已显式配置且使用必填参数；不能把不支持该配置的旧 main 构建替换上线。
+
+## 3. Goals and Non-Goals
+
+目标：项目代码归项目维护；发布版本可追溯到干净已提交源码；下载校验 GitHub Release 后切换实际协调器和 UI。非目标：重写 Git 历史、删除历史验收、重命名存量数据库/unit、部署 AutoTask 业务版本、取消/重试生产请求、变更集群/网络权限。
+
+## 4. Scope
+
+允许 Shipbraid 的 AutoTask 专用 integration/安装器/LAN unit 删除、相关活跃文档与 CI 去耦；通用发行工具进入已更新的独立发布 worktree。AutoTask 仓库接收专用适配器/测试/配置说明，按该仓库规则显式提交并 push vibe。现场仅更新协调器二进制与 Dashboard 路径、可选 CLI 链接；保持账本、身份、lane、项目 hook 路径、参数约束不变。共享主工作树的其他会话改动不暂存或覆盖。
+
+## 5. Users and Use Cases
+
+Shipbraid 用户只安装二进制并配置通用 hooks。AutoTask 维护者在自己仓库维护项目发布工具；已有实例升级保持历史执行可观察。需要 unknown 的实例不得因升级强行释放所有权。
+
+## 6. Requirements
+
+- FR-001: Shipbraid 当前 Git 快照不含 AutoTask 专用可执行代码或主机绑定 LAN units；历史记录保留。
+- FR-002: AutoTask 仓库保存当前已审查的开发/生产/未交接恢复适配器及测试，源代码归属清晰；不改写运行中的冻结副本。
+- FR-003: 正式发行包含线上现有通用参数能力、所有权与协议兼容；基于已提交远端 main 整合上一轮发行工具，发行 tag 与 package version 一致。
+- FR-004: GitHub Release 工件下载后校验 sidecar 与 manifest；先 drain、确认无活动 run、在线备份账本和私有配置，原子切换 unit override/UI 路径，保留回退记录。
+- FR-005: 启动后请求/run/receipt 数量与状态、lane 指纹与参数、凭据作用域相符；已知只读入口可用；不触发业务部署。
+- NFR-001: 不记录秘密，不提交 DB 或私有配置；至少一次交付，unknown 不因超时变为 stopped。
+- NFR-002: main 和 AutoTask vibe 只整合本任务变更；发布在干净独立 worktree，保护共享 WIP。
+- NFR-003: 失败回退到旧二进制/UI/原配置；不以回退数据库抹去新请求。若 schema 变化则在切换前阻断，本轮预期无 schema 变化。
+
+## 7. Proposed Solution
+
+以 `origin/main`（已含通用参数与生产交接修复）建立 `codex/release-decoupling` worktree。迁走项目集成文件，通用 API/调度器不加入业务特例。更新用户文档与 CI，适配器保存在 AutoTask `scripts/shipbraid/`，安装配置不携带秘密。发布新 SemVer 版本，经本地和远端检查后发布 GitHub Release。
+
+线上继续使用现有 `~/.config/auto-deliver/` 和 `~/.local/share/auto-deliver/`，不启第二协调器。旧 hook 路径作为冻结运行资产保留；新源码位置不会改变旧 run 的配置。下载的发行二进制和 web 安装到新私有版本目录，systemd drop-in 只变更 ExecStart，服务 TOML 只变更 dashboard_dir。线上目前 dev/prod 无 active run；迁移前后重新检查，不据第一次快照推断后续状态。
+
+## 8. Alternatives and Tradeoffs
+
+不选择新安装器重建实例：会丢历史请求和所有权。不重写历史以消除所有字符串：会破坏审计及 Git 共享历史。不用 cargo --release 本机构建冒充 GitHub Release；以实际下载资产为切换来源。
+
+## 9. Risks
+
+共享工作树 main 落后远端，直接 pull/覆盖会损坏其他工作：隔离整合。旧 main 缺必填参数，不兼容当前配置：使用已经提交的最新实现并以私有在线备份做禁调度启动验证。并发新请求：drain 后重新统计 accepted/waiting/active，切换过程无新副作用；恢复原 drain 状态须现场检查队列，不提交/重试业务请求。旧 hook 仍可读是恢复必要条件，不删除安装目录。
+
+## 10. Validation Strategy
+
+Rust fmt/clippy/test；Python 通用与迁入适配器测试；CLI 参数与 hooks/Agent/包验收；前端构建。GitHub 远端 tag 检查与工件 checksum、manifest核对。使用在线备份的私有副本禁调度验证新二进制能读原 schema、保留参数和指纹；实际切换后只读比对账本快照、请求历史、lane、Dashboard 与进程 executable hash。
+
+## 11. Rollout Plan
+
+先代码迁出和测试/提交，再发行；准备新工件与回退，最后按已授权范围切换本机协调器。服务短暂停机不代表执行器停止。生产应用版本不变，不向集群发送部署命令。若真实任务启动或出现 unknown，等待并核对，不擅自取消。
+
+## 12. Open Questions
+
+用户已明确选择 GitHub 已发布 Release（不是本机 release 构建）。新版本号由本轮发布整合决定。无其他阻塞问题。
+
+## 13. Review Feedback Tracking
+
+1. Verdict: PASS；confidence MEDIUM，运行前必须再次检查现场。
+2. Overdesign: 不拆服务/新数据库/重做执行器；只迁归属与发行切换。
+3. Feasibility: 一轮可交付，CI/网络为外部等待；已有通用兼容实现可复用。
+4. Completeness: MAJOR—main落后导致配置不兼容，已通过 origin/main 基线与副本禁调度验证解决设计；MAJOR—删除冻结 hook 会失去证据，只删除 Git 源，不动已安装副本；MAJOR—跨仓库 WIP，只显式提交本任务文件。
+5. Clarifying questions: release来源已回答；没有业务部署授权，也不需要业务部署来验证协调器升级。
+
+## 14. Definition of Design Complete
+
+范围、授权、失败处理和验证明确，review PASS；执行中的状态与最终证据见计划。

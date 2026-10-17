@@ -21,10 +21,6 @@ jobs:
       - run: python3 scripts/acceptance-hooks.py
       - run: python3 scripts/acceptance-agents.py
       - run: python3 scripts/acceptance-cli.py
-      - run: python3 integration/autotask/test_bridge.py
-      - run: python3 integration/autotask/test_production.py
-      - run: python3 integration/autotask/test_recover_unstarted.py
-      - run: python3 deploy/test_install_local.py
   dashboard:
     runs-on: ubuntu-latest
     defaults:
@@ -42,3 +38,14 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm build
+  distribution:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - run: python3 scripts/test_package_release.py
+      - run: python3 deploy/test_install_standalone.py
+      - run: python3 integration/local/test_adapter.py
+      - run: python3 integration/github/test_receiver.py

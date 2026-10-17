@@ -8,9 +8,9 @@
 
 Shipbraid 协调开发者、Agent 和自动化提交的上线需求。兼容请求共享执行；紧急请求在安全条件下替代可打断的工作；每个请求独立保留，直到匹配的环境验收证据确认交付。
 
-**当前状态：早期开发阶段。** 已实现本地模拟和可配置外部 hooks；首个真实接入已在 AutoTask 本机开发环境验收。安全抢占目前适用于模拟执行器，外部 hooks 整体不可抢占，随附集成的生产环境保持禁用。
+**当前状态：早期开发阶段。** 已实现本地模拟和可配置外部 hooks。安全抢占目前适用于模拟执行器，外部 hooks 整体不可抢占，生产通道默认禁用。
 
-Cargo package 与可执行文件统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀，新安装使用 `shipbraid.service`。已有安装升级前请阅读[改名与升级说明](docs/naming.md)。
+CLI 与服务端可执行文件统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀，新安装使用 `shipbraid.service`。已有安装升级前请阅读[改名与升级说明](docs/naming.md)。
 
 ![Shipbraid 发布协调台：发布请求及已通过的环境验收回执](docs/assets/shipbraid-dashboard.png)
 
@@ -46,64 +46,44 @@ flowchart LR
 
 覆盖判断同时检查仓库、通道、组件、配置、权限和版本策略。默认要求版本完全一致；显式启用的 `descendant` 模式还会验证 Git 祖先关系。祖先关系只证明版本历史，不能证明功能没有被 revert。
 
-Shipbraid 独立于 AutoTask，具体构建与部署继续使用你配置的工具。运行形态是单个 Rust 服务、本地 SQLite 数据库、HTTP API、CLI，以及只读 React Dashboard。
+Shipbraid 协调发布请求，具体构建与部署由各项目使用自己的工具。运行形态是单个服务、本地 SQLite 数据库、HTTP API、CLI，以及只读 Dashboard。
 
-## 快速开始：本地模拟
+## 快速开始：使用二进制
 
-需要 Rust **1.94+**、Git，以及用于以下令牌生成命令的 OpenSSL。可选 Dashboard 需要 Node.js **24** 和 pnpm **11.24.0**。命令从仓库根目录运行。
-
-### 1. 启动协调器
+从 [GitHub Releases](https://github.com/aak1247/shipbraid/releases) 下载已发布版本的 Linux x86_64 GNU 发行包和 `.sha256`，校验后解压。发行包包含 CLI、服务端、构建好的 Dashboard、适配器和安装器，运行无需 Rust 或 Node.js。首次公开发行需由维护者完成 tag 和 Release 发布；具体版本以 Releases 页面为准。
 
 ```bash
-git clone https://github.com/aak1247/shipbraid.git shipbraid
-cd shipbraid
-cargo build --locked
-
-mkdir -p data
-git clone --mirror . data/source.git
-# 示例配置信任 main；当前 checkout 在其他分支时也可演示。
-git --git-dir=data/source.git update-ref refs/heads/main "$(git rev-parse HEAD)"
-
-export SHIPBRAID_TOKEN="$(openssl rand -hex 32)"
-export SHIPBRAID_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
-cargo run --locked -- serve --config examples/local.toml
+# 文件名以下载的版本为准；以下以 0.3.0 为例。
+sha256sum --check shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd shipbraid-0.3.0-x86_64-unknown-linux-gnu
+export SHIPBRAID_BUNDLE="$PWD"
+export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
+shipbraid --version
 ```
 
-API 监听 `http://127.0.0.1:8787`。该配置使用 **ScriptedExecutor**，模拟构建、部署阶段和验收，不部署真实应用。镜像是固定本地快照，不会自动拉取或更新。
+第一次体验可直接按[本地模拟](docs/distribution.md#本地模拟)启动二进制和内置 Dashboard，不部署真实应用。需要发布自己的项目时，维护者先按[二进制安装与接入](docs/distribution.md#首次接入自己的项目)注册受信仓库、部署脚本和独立验收脚本。安装器和本机适配器需要 Python **3.11+**；本机任务由 systemd user manager 独立托管。安装本身不会启动服务或发布应用。
 
-### 2. 提交请求
-
-在第二个终端进入仓库，将 `SHIPBRAID_TOKEN` 设置为上一步相同的操作者令牌。令牌应私密保存；CLI 也支持 `--token-file`。
+项目已接入时，开发者只需团队提供的服务地址、token 文件和通道配置：
 
 ```bash
-REVISION=$(git rev-parse HEAD)
-cargo run --locked -- submit \
-  --lane demo-test \
-  --revision "$REVISION" \
-  --components app \
-  --idempotency-key my-first-release
-
-# 将 REQUEST_ID 替换为 submit 返回的 id。
-cargo run --locked -- wait REQUEST_ID --timeout-seconds 120
-cargo run --locked -- list request --lane demo-test
+export SHIPBRAID_URL="http://127.0.0.1:8787"
+export SHIPBRAID_TOKEN_FILE="$HOME/.config/shipbraid/my-project.token"
+shipbraid --json system
+shipbraid --json list lane
+shipbraid submit \
+  --project my-project --environment dev \
+  --revision <已同步的完整SHA> --components app \
+  --idempotency-key <本次发布意图的稳定键>
+shipbraid wait REQUEST_ID --timeout-seconds 600
+shipbraid inspect request REQUEST_ID
 ```
 
-同一意图重试时保持相同幂等键和正文；同键不同正文返回冲突。针对兼容目标的独立请求可以共享活动执行。
-
-也可用 `--project demo --environment test` 选择通道。紧急请求使用 `--priority urgent`，并需要令牌授权；`--coverage descendant` 需要通道显式开启。
+示例目标、组件和凭据路径必须替换为项目实际值；`REQUEST_ID` 使用 submit 返回的 id。同一意图重试保持相同幂等键和正文，同键不同正文返回冲突。默认 exact；`descendant` 需要通道显式开启。
 
 `wait` 超时或断开不会撤回服务端请求。退出码：`0` 已满足、`2` 需处理、`3` 过期、`4` 已撤回、`124` 本地超时、`1` 命令或配置错误。
 
-### 3. 打开 Dashboard
-
-```bash
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web dev
-```
-
-打开 `http://127.0.0.1:5187`，输入操作者令牌。Vite 将 API 请求代理至协调器，令牌只驻留当前页面内存。
-
-只读 Dashboard 展示通道、请求、执行、替代关系、环境筛选、审计时间线、有界日志和验收回执。提交与运维操作通过 API 或 CLI 完成。
+Dashboard 由同一服务提供，默认打开 `http://127.0.0.1:8787`，输入自己的令牌即可；令牌只驻留页面内存。无需另启前端开发服务器。远程访问使用团队配置的受控 HTTPS 入口或 SSH 转发。
 
 ## Agent 使用
 
@@ -121,7 +101,7 @@ pnpm --dir web dev
 
 长任务由独立监督器运行。成功交接不等于发布验收成功。Hooks v1 要求 `allow_preemption = false`，不提供 cancel hook。
 
-配置方式见[执行器协议与安装指南](docs/hooks.md)；首个真实部署的证据见 [AutoTask 开发环境接入](docs/features/iter-20261016-executor-integration/verification.md)。通用协调器不依赖 AutoTask 的数据库、运行时或业务实体。
+配置方式见[执行器协议](docs/hooks.md)和[项目接入指南](docs/project-integration.md)。Shipbraid 不依赖接入项目的数据库、运行时或业务实体。
 
 ## 运行模型与当前限制
 
@@ -142,7 +122,10 @@ cargo build --locked
 python3 scripts/acceptance.py
 python3 scripts/acceptance-hooks.py
 python3 scripts/acceptance-agents.py
-python3 integration/autotask/test_bridge.py
+python3 scripts/test_package_release.py
+python3 deploy/test_install_standalone.py
+python3 integration/local/test_adapter.py
+python3 integration/github/test_receiver.py
 
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web typecheck
@@ -156,7 +139,9 @@ pnpm --dir web build
 
 ## 文档
 
+- [二进制安装、项目脚本、webhook 与升级](docs/distribution.md)
 - [Agent 工作流与协作](docs/agents.md)
+- [项目接入与项目 AGENTS.md 模板](docs/project-integration.md)
 - [HTTP API 与 CLI 契约](docs/api.md)
 - [外部执行器与安装](docs/hooks.md)
 - [架构与领域模型](docs/design.md)

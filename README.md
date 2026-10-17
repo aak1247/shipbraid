@@ -8,9 +8,9 @@
 
 Shipbraid coordinates release requests from developers, agents, and automation. Compatible requests share an execution; urgent requests can replace interruptible work when safe; every request keeps its own identity until matching environment evidence confirms delivery.
 
-**Status: early development.** Local simulation and configurable external hooks are implemented. The first real integration has been verified against an AutoTask local development environment. Safe preemption currently works with the simulated executor; external hooks are non-preemptible, and production is disabled in the supplied integration.
+**Status: early development.** Local simulation and configurable external hooks are implemented. Safe preemption currently works with the simulated executor; external hooks are non-preemptible, and production lanes are disabled by default.
 
-The Cargo package and executable are `shipbraid`; environment variables use `SHIPBRAID_`, and new installations use `shipbraid.service`. See the [rename and upgrade notes](docs/naming.md) before upgrading an existing installation.
+The CLI and service executable is `shipbraid`; environment variables use `SHIPBRAID_`, and new installations use `shipbraid.service`. See the [rename and upgrade notes](docs/naming.md) before upgrading an existing installation.
 
 ![Shipbraid dashboard showing release requests and a verified environment receipt](docs/assets/shipbraid-dashboard.png)
 
@@ -46,64 +46,44 @@ A **request** is an immutable release intent. A **run** is one execution attempt
 
 Coverage checks repository, lane, components, configuration, authorization, and revision policy. The default is an exact revision match. Explicitly enabled `descendant` coverage also checks Git ancestry; ancestry proves history, and cannot prove that a feature has not been reverted.
 
-Shipbraid is independent of AutoTask and uses your configured build and deployment tools. Its runtime is one Rust service with a local SQLite database, an HTTP API, a CLI, and a read-only React dashboard.
+Shipbraid coordinates release requests while each project keeps its own build and deployment tools. The runtime is one service with a local SQLite database, an HTTP API, a CLI, and a read-only dashboard.
 
-## Quick start: local simulation
+## Quick start: use a binary
 
-Requires Rust **1.94+**, Git, and OpenSSL for the token-generation commands below. The optional dashboard requires Node.js **24** and pnpm **11.24.0**. Run commands from the repository root.
-
-### 1. Start the coordinator
+Download a published Linux x86_64 GNU bundle and its `.sha256` file from [GitHub Releases](https://github.com/aak1247/shipbraid/releases), verify, and unpack. The bundle includes the CLI/server, prebuilt dashboard, adapters, and installer; users need neither Rust nor Node.js. Maintainers must tag and publish the first public Release before downloads become available; use the version shown on the Releases page.
 
 ```bash
-git clone https://github.com/aak1247/shipbraid.git shipbraid
-cd shipbraid
-cargo build --locked
-
-mkdir -p data
-git clone --mirror . data/source.git
-# The sample config trusts main, even when the checkout uses a different branch.
-git --git-dir=data/source.git update-ref refs/heads/main "$(git rev-parse HEAD)"
-
-export SHIPBRAID_TOKEN="$(openssl rand -hex 32)"
-export SHIPBRAID_EXECUTOR_TOKEN="$(openssl rand -hex 32)"
-cargo run --locked -- serve --config examples/local.toml
+# Use the version you downloaded; 0.3.0 is shown here.
+sha256sum --check shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+cd shipbraid-0.3.0-x86_64-unknown-linux-gnu
+export SHIPBRAID_BUNDLE="$PWD"
+export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
+shipbraid --version
 ```
 
-The API listens on `http://127.0.0.1:8787`. This configuration uses **ScriptedExecutor**: it simulates builds, deployment phases, and verification without deploying an application. The mirror is a fixed local snapshot; it is not automatically fetched or updated.
+For a first look, follow the [binary simulation walkthrough](docs/distribution.md#本地模拟). It starts the coordinator and bundled dashboard without deploying an application. For your own project, a maintainer first [installs and configures the project](docs/distribution.md#首次接入自己的项目), including a trusted mirror, deployment scripts, and independent verification. The installer/local adapter requires Python **3.11+**; local jobs run under an independent systemd user manager. Installation does not start services or submit deployments.
 
-### 2. Submit a request
-
-In a second terminal, enter the repository and set `SHIPBRAID_TOKEN` to the same operator token used above. Keep tokens private; the CLI also supports `--token-file`.
+Once the project is connected, developers need only the team's service URL, token file, and registered target:
 
 ```bash
-REVISION=$(git rev-parse HEAD)
-cargo run --locked -- submit \
-  --lane demo-test \
-  --revision "$REVISION" \
-  --components app \
-  --idempotency-key my-first-release
-
-# Replace REQUEST_ID with the id returned by submit.
-cargo run --locked -- wait REQUEST_ID --timeout-seconds 120
-cargo run --locked -- list request --lane demo-test
+export SHIPBRAID_URL="http://127.0.0.1:8787"
+export SHIPBRAID_TOKEN_FILE="$HOME/.config/shipbraid/my-project.token"
+shipbraid --json system
+shipbraid --json list lane
+shipbraid submit \
+  --project my-project --environment dev \
+  --revision <full-synced-SHA> --components app \
+  --idempotency-key <stable-release-intent-key>
+shipbraid wait REQUEST_ID --timeout-seconds 600
+shipbraid inspect request REQUEST_ID
 ```
 
-Retry the same intent with the same idempotency key and body. Reusing a key with different content returns a conflict. Separate requests for a compatible target can share an active run.
+Replace the example target, components, and credential path with your project's values; use the id returned by submit for `REQUEST_ID`. Retry the same intent with the same idempotency key and body. Reusing a key with a different body returns a conflict. Coverage defaults to exact; descendant mode requires explicit lane opt-in.
 
-You can also select a lane with `--project demo --environment test`. Urgent submission uses `--priority urgent` and requires an authorized token. `--coverage descendant` requires explicit lane opt-in.
+A local `wait` timeout or disconnect does not withdraw the request. Exit codes: `0` satisfied, `2` needs attention, `3` expired, `4` withdrawn, `124` local timeout, `1` command/configuration error.
 
-`wait` timing out or disconnecting leaves the server request active. Exit codes: `0` satisfied, `2` needs attention, `3` expired, `4` withdrawn, `124` local timeout, `1` command/configuration error.
-
-### 3. Open the dashboard
-
-```bash
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web dev
-```
-
-Open `http://127.0.0.1:5187` and enter the operator token. Vite proxies API requests to the coordinator. The token stays in page memory.
-
-The read-only dashboard shows lanes, requests, runs, replacement relationships, environment filters, audit timelines, bounded logs, and verification receipts. Submit requests and perform administrative operations through the API or CLI.
+The same service serves the dashboard at `http://127.0.0.1:8787` by default. Enter your token, which stays in page memory. No separate frontend dev server is needed. For remote access, use the team's controlled HTTPS endpoint or SSH forwarding.
 
 ## For agents
 
@@ -121,7 +101,7 @@ External integrations use administrator-configured **commands, scripts, or webho
 
 Long-running work belongs in an independent supervisor. A successful dispatch response is not release acceptance. Hooks v1 requires `allow_preemption = false`; it has no cancel hook.
 
-See the [executor protocol and installation guide](docs/hooks.md) for configuration and the [AutoTask development integration](docs/features/iter-20261016-executor-integration/verification.md) for the first real deployment's evidence. The generic coordinator has no dependency on AutoTask's database, runtime, or business entities.
+See the [executor protocol](docs/hooks.md) and [project integration guide](docs/project-integration.md) for setup. Shipbraid does not depend on a client project's database, runtime, or business entities.
 
 ## Operating model and current limits
 
@@ -142,7 +122,10 @@ cargo build --locked
 python3 scripts/acceptance.py
 python3 scripts/acceptance-hooks.py
 python3 scripts/acceptance-agents.py
-python3 integration/autotask/test_bridge.py
+python3 scripts/test_package_release.py
+python3 deploy/test_install_standalone.py
+python3 integration/local/test_adapter.py
+python3 integration/github/test_receiver.py
 
 pnpm --dir web install --frozen-lockfile
 pnpm --dir web typecheck
@@ -156,7 +139,9 @@ Contributions are welcome. Start with the [design](docs/design.md), [execution p
 
 ## Documentation
 
+- [Binary installation, project scripts, webhooks, and upgrades](docs/distribution.md)
 - [Agent workflow and collaboration](docs/agents.md)
+- [Project integration and project AGENTS.md template](docs/project-integration.md)
 - [HTTP API and CLI contract](docs/api.md)
 - [Executor hooks and installation](docs/hooks.md)
 - [Architecture and domain model](docs/design.md)

@@ -1,6 +1,6 @@
 # Agent 发布管理
 
-Shipbraid 接受同一团队内多个 Agent 通过 HTTP 或 CLI 协作。当前租户由服务端固定为 `local`，不接受客户端指定。项目与二进制统一为 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀。已有安装升级见[改名说明](naming.md)。
+Shipbraid 接受同一团队内多个 Agent 通过 HTTP 或 CLI 协作。当前租户由服务端固定为 `local`，不接受客户端指定。项目与 CLI 统一使用 `shipbraid`，环境变量使用 `SHIPBRAID_` 前缀。项目接入与项目级 `AGENTS.md` 模板见[项目接入指南](project-integration.md)；已有安装升级见[改名说明](naming.md)。
 
 ## 配置身份
 

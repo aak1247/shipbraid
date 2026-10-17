@@ -10,7 +10,7 @@
 - Review gate status：PASS。
 - Linked review report：[§13 设计评审与反馈](#13-review-feedback-tracking)。
 - Linked execution plan：[execution-plan.md](execution-plan.md)。
-- New user-authorized scope：[外部执行器与 AutoTask 开发环境接入](features/iter-20261016-executor-integration/design.md)（独立迭代；不关闭原 M1 验收缺口）。
+- Historical integration record：[外部执行器接入迭代](features/iter-20261016-executor-integration/design.md)（当时的项目环境验收记录；不改变本设计的 M1 验收状态）。
 - Agent iteration：[同团队 Agent 发布闭环](features/iter-20261017-agent-workflow/design.md)（2026-10-17，用户确认固定 local 租户；[验收记录](features/iter-20261017-agent-workflow/verification.md)）。
 - Implementation checkpoint：[首批实现与未完成项](acceptance/m1.md)；设计批准不代表全部 M1 已实现。
 
@@ -22,7 +22,7 @@
 
 设计来源是两个明确场景：① 已有上线任务覆盖需求，直接等待同一任务；② 紧急请求抢占可打断的普通执行，被替代请求继续等待新的发布结果。问题重点是调度和结果归属，编译命令可以继续使用现有工具。
 
-项目独立于 AutoTask，AutoTask 只是未来的第一个接入方。新仓库不复制 AutoTask 生产凭据、环境清单或整套发布脚本。
+项目独立于所有接入方。仓库不复制下游项目的生产凭据、环境清单或整套发布脚本。
 
 ## 3. Goals and Non-Goals
 
@@ -41,7 +41,7 @@
 
 M1 必须完整验收用户的两条核心规则，但只对可控执行器声明通过。可运行的真实发布闭环要到 M2 才成立。
 
-约束：首版单实例、单个本地持久卷，多个调用者并发访问；每条发布通道最多一个活动执行。SQLite 不放在 NFS/共享网络文件系统上。不在设计阶段改造现有 AutoTask 发布入口或触发真实部署。
+约束：首版单实例、单个本地持久卷，多个调用者并发访问；每条发布通道最多一个活动执行。SQLite 不放在 NFS/共享网络文件系统上。不在设计阶段改造调用方的既有发布入口或触发真实部署。
 
 ## 5. Users and Use Cases
 
@@ -103,7 +103,7 @@ flowchart LR
 
 | 对象 | 核心字段 | 规则 |
 | --- | --- | --- |
-| Lane | id、project、environment、profile_digest、active_run_id、generation、blocked_reason | 代表一个共享部署写入边界，如 autotask/prod/app；组件子集仍共用该 lane |
+| Lane | id、project、environment、profile_digest、active_run_id、generation、blocked_reason | 代表一个共享部署写入边界，如 myapp/prod/app；组件子集仍共用该 lane |
 | ReleaseRequest | id、principal、idempotency_key/hash、target、priority、deadline、status、current_run_id、satisfied_by_receipt、auto_retries_used、manual_retries_used | 需求是不可变快照；紧急提升是显式审计操作，不修改原目标 |
 | DeliveryRun | id、lane、target、effective_priority、state、phase、generation、executor_ref、replacement_run_id、cancel_reason | 一次尝试；目标启动后不可改变；下一次尝试有新 run_id |
 | DeploymentReceipt | id、run、observed_at、source_revision、component_digests、profile_digest、verification_report、result | 冻结实际产物和目标环境验收证据；CI exit 0 不等于 receipt 成功 |
@@ -226,7 +226,7 @@ SQLite 事务保证本地状态原子性，不能包住 GitHub/SSH/K8s 的副作
 
 ~~~json
 {
-  "lane_id": "autotask-test-app",
+  "lane_id": "myapp-test-app",
   "revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
   "components": ["app"],
   "coverage_mode": "descendant",
@@ -279,7 +279,7 @@ receipt 的环境/组件/产物摘要必须由可信 verifier 读取实际目标
 
 ### 7.11 与现有系统的关系
 
-首个调用方可以是 AutoTask 的发布动作：提交源 SHA 和目标 lane，保存 request_id，然后等待结果。独立项目不引入 AutoTask Session/Task 数据表或内部工具接口。
+调用方的发布入口可提交源 SHA 和目标 lane，保存 request_id，然后等待结果。独立项目不引入接入方的 Session/Task 数据表或内部工具接口。
 
 独立发布仓库中的 GitHub Actions 负责可信的构建/发布步骤；shipbraid 负责统一决策和状态。现有备份、审批、镜像来源校验、环境 diff 和部署验收继续由受控 profile 执行，调度合并不等于授权扩大。M2 先接测试 lane，真实生产接入有单独的审批与资源变更范围。
 
@@ -290,7 +290,7 @@ receipt 的环境/组件/产物摘要必须由可信 verifier 读取实际目标
 | 仅 GitHub Actions concurrency | 配置少，能限制并发/取消部分任务 | 没有项目所需的请求覆盖、等待者转移与结果结算模型；作为执行器使用 |
 | Temporal | 持久执行、消息和恢复基础完善 | 首版为少量固定状态、单实例；引入额外服务与工作流运维成本。后续需求扩大可重新评估 |
 | Rust + PostgreSQL 多实例 | 行锁、多个协调器和独立数据库运维 | 当前没有 HA 要求；比单机 SQLite 更重，未来独立迁移而非首版双存储 |
-| 在 AutoTask 内实现 | 可复用已有用户/任务界面 | 与独立项目目标冲突，发布调度不应绑定业务运行时 |
+| 在既有业务运行时内实现 | 可复用已有用户/任务界面 | 与独立项目目标冲突，发布调度不应绑定业务运行时 |
 | Dagger/BuildKit | 构建编排和缓存有价值 | 不提供本项目的请求成功归属；可在执行器里使用 |
 
 选择单实例 Rust + SQLite，是为了先把调度语义和外部交付边界做正确；性能收益来自少做重复任务，而不是换语言自动加速编译。

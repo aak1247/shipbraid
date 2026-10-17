@@ -81,58 +81,26 @@ timeout_ms = 10000
 
 该配置支持与其他 hook 相同的 command/script/webhook 传输，必须由管理员审查为只读，输入仍为 `operation=observe`。协调器只接受其 `failed + failure_proof`，忽略其他结果；它不能 dispatch、接纳 running 或验收成功。该补充观察器不改变原执行 profile，原 dispatch/observe/verify 路径和参数必须保持冻结值，目标、generation、所有权检查仍然生效。审计证据记录补充观察器配置的 SHA-256。显式 `confirm_stopped` 也要求重新获取同样的新鲜证据，人工备注不能代替证明。
 
-AutoTask bridge 核对持久 request/result、systemd Id/InvocationID、非零退出状态及前后稳定的监督器快照，并递归检查 cgroup 子树及 `populated=0`；不存在的 unit、活动后代、不可读证据或检查期间变化均不生成证明。旧 result 不被改写，额外要求监督器 ExecStart 精确绑定该 request 路径、退出时间与持久结果相差不超过 10 秒。
-
 相同的观察摘要与 unknown 原因只记录一次，去重标记随账本持久化；新状态或原因仍会记录。带新源序号的真实日志即使文字相同也会保存，历史重复审计行不会删除。
 
 ## HTTP 与 CLI
 
 ```bash
 shipbraid --token-file ~/.config/shipbraid/operator.token submit \
-  --project autotask --environment dev --revision <full-sha> --components app \
+  --project myapp --environment dev --revision <full-sha> --components app \
   --idempotency-key <stable-intent-key>
 ```
 
 HTTP `POST /v1/requests` 同样接受 project + environment，或显式 lane_id（二者互斥）。先解析为唯一已授权 lane，再计算幂等正文；同项目不同环境不会共享执行。存在多个匹配 lane 时必须显式选择 lane_id。完整接口见 [api.md](api.md)。
 
-## AutoTask 本机安装
+## 二进制安装
 
-以下使用统一后的 `shipbraid` 标识；新安装与已有旧安装的区别见[改名与升级说明](naming.md)。2026-10-16 的现场验收保留当时的服务名与路径，不表示现有运行实例已完成改名。
+发行包包含 `shipbraid` CLI/服务端、Dashboard 静态资源和受支持的适配器。安装与升级步骤见[二进制发行指南](distribution.md)；Rust 与 Node.js 仅在源码构建时需要。已有团队服务时，每个部署边界只运行一个协调器；客户端机器只需二进制、服务地址和自己的 token 文件。
 
-在本机开发主机运行以下命令只安装服务，不自动提交发布：
+## 通用适配器
 
-```bash
-cargo build --release --locked
-pnpm --dir web install --frozen-lockfile
-pnpm --dir web build
-python3 deploy/install-local.py
-```
+每条 lane 使用管理员配置的受信执行器。项目可以提供固定 command/script hooks，也可以提供实现同一版本化 `dispatch`、`observe`、`verify` 协议的 webhook。请求只携带版本、组件和已声明参数，不能选择命令、路径或 URL。
 
-安装器创建常驻服务 `shipbraid.service`，UI/API 同源 `http://127.0.0.1:8787`；配置/凭据位于 `~/.config/shipbraid/`，数据库、执行证据和不可变程序发布目录位于 `~/.local/share/shipbraid/`。令牌文件 mode0600；Dashboard 令牌仍只保存于当前页面内存中。
+随发行包提供的[本机适配器](../integration/local/README.md)可在 Linux、Python 3.11+、systemd user manager 和 cgroup v2 上监督固定项目命令。示例使用合成项目。真实项目应先在明确授权的非生产环境独立验证适配器配置、凭据、停止证据、实际版本、组件摘要、配置指纹和健康检查，再依赖该执行路径。生产接入需要单独明确授权。
 
-远程查看开发 Dashboard 可用 SSH 转发：`ssh -L 8787:127.0.0.1:8787 yahui@172.168.3.70`，再打开本机地址。公网入口必须另行配置 HTTPS；本次不创建公网 DNS/Ingress。
-
-局域网入口样例地址为 `http://172.168.3.70:8787`。独立 user socket 仅绑定该 IPv4 地址，使用系统自带的 `systemd-socket-proxyd` 转发到 `127.0.0.1:8787`，沿用 API 的 Bearer 鉴权；协调器仍监听 loopback，启用入口不需要重启协调器或正在运行的部署任务。登录令牌从主机 `~/.config/shipbraid/admin.token` 读取，不随页面分发。该 HTTP 入口用于局域网 Dashboard；CLI 保留 loopback HTTP / HTTPS 的地址校验。
-
-局域网入口的固定主机 unit 在 [shipbraid-lan.socket](../deploy/shipbraid-lan.socket) 和 [shipbraid-lan.service](../deploy/shipbraid-lan.service)，安装与停用方式如下：
-
-```bash
-install -m 644 deploy/shipbraid-lan.socket deploy/shipbraid-lan.service ~/.config/systemd/user/
-systemctl --user daemon-reload
-systemctl --user enable --now shipbraid-lan.socket
-# 停用局域网入口，协调器和发布任务继续运行：
-systemctl --user disable --now shipbraid-lan.socket
-systemctl --user stop shipbraid-lan.service
-```
-
-AutoTask 的 `pnpm deploy:local` 通过 HTTP 提交并等待，具体 worker 在独立 systemd user unit 中执行安装时固定的已提交部署脚本。它拒绝脏 checkout、强制重建 backend/worker，并独立检查源码、实际进程、构建产物及健康。生产 lane 默认 disabled，桥接器本身也拒绝 prod 目标。真实本机验收记录见对应 feature 的 [执行计划](features/iter-20261016-executor-integration/execution-plan.md)。
-
-首次安装从开发部署 checkout 的实际提交初始化受信发布线；后续本机客户端仅快进更新固定镜像引用。共享分支与当前开发环境分叉时，需先合并历史，不能让协调入口偷偷覆盖其他会话的发布。
-
-升级安装器拒绝覆盖仍 active 的协调器。先 drain，等活动任务结算并核对所有权，再停止服务、安装新 release。停止协调器不会停止独立执行的发布任务。
-
-Dashboard 的独立静态资源发布目录为 `~/.local/share/shipbraid/dashboard-releases/<commit>-<digest>/web`。仅前端更新时，构建 `web/dist`，复制到新的不可变目录，切换私有配置中的 `dashboard_dir` 后重启协调器；执行器路径、lane 配置和 profile 指纹保持原值，启动后核对现有任务所有权。完整程序/执行器升级仍遵循上面的排空流程。宽详情与 tail 日志的浏览器及发布证据见 [dashboard-tail-20261016.json](acceptance/dashboard-tail-20261016.json)。
-
-失败恢复与重复观察修复的本机验收见 [2026-10-17 记录](acceptance/hook-failure-recovery-20261017.json)。该次维护保留旧安装的 unit、数据目录和冻结执行器配置，只更新协调器及只读失败观察器；旧失败请求进入需处理，未重试发布，生产仍禁用。
-
-Shipbraid 名称、页内 Logo 与浏览器图标的静态资源更新见[品牌发布记录](acceptance/dashboard-brand-20261017.json)及[桌面/手机浏览器验证](acceptance/dashboard-brand-browser-20261017.json)。此次只切换 `dashboard_dir`，保留既有二进制、执行器配置、通道所有权和发布结果；已有浏览器页面刷新后加载新资源。
+部署脚本和项目专属配置保存在 Shipbraid 仓库之外。接入步骤和项目级 `AGENTS.md` 模板见[项目接入指南](project-integration.md)。
