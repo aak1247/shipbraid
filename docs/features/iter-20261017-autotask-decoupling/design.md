@@ -2,7 +2,7 @@
 
 ## 1. Document Control
 
-- Version: 2; Author / Reviewer: Codex（同会话自审）
+- Version: 3; Author / Reviewer: Codex（同会话自审）
 - Date: 2026-10-17; Status: APPROVED; Review gate: PASS（§13）
 - Plan: [execution-plan.md](execution-plan.md)
 
@@ -27,7 +27,7 @@ Shipbraid 用户只安装二进制并配置通用 hooks。AutoTask 维护者在�
 - FR-001: Shipbraid 当前 Git 快照不含 AutoTask 专用可执行代码或主机绑定 LAN units；历史记录保留。
 - FR-002: AutoTask 仓库保存当前已审查的开发/生产/未交接恢复适配器及测试，源代码归属清晰；不改写运行中的冻结副本。
 - FR-003: 正式发行包含线上现有通用参数能力、所有权与协议兼容；基于已提交远端 main 整合上一轮发行工具，发行 tag 与 package version 一致。
-- FR-004: GitHub Release 工件下载后校验 sidecar 与 manifest；先 drain、确认无进行中的部署/验证及未确认命令、在线备份账本和私有配置；已有 Unknown 必须保留原所有权，原子切换 unit override/UI 路径，保留回退记录。
+- FR-004: GitHub Release 工件下载后校验 sidecar 与 manifest；先 drain、确认没有未确认命令；活动部署只有在独立执行器身份可验证且调度写入权完整保留时允许维护；在线备份账本和私有配置；已有 Unknown 必须保留原所有权，原子切换 unit override/UI 路径，保留回退记录。
 - FR-005: 启动后请求/run/receipt 数量与状态、lane 指纹与参数、凭据作用域相符；已知只读入口可用；不触发业务部署。
 - NFR-001: 不记录秘密，不提交 DB 或私有配置；至少一次交付，unknown 不因超时变为 stopped。
 - NFR-002: main 和 AutoTask vibe 只整合本任务变更；发布在干净独立 worktree，保护共享 WIP。
@@ -78,3 +78,13 @@ Rust fmt/clippy/test；Python 通用与迁入适配器测试；CLI 参数与 hoo
 代码复核：Service::open 对已有 Unknown 不做恢复重放，register_lane 保留 active_run_id/generation，reconcile 对 Unknown 返回 Blocked。scheduler 在 drain 时仍会 Observe，并可能调用 failure_observe/Verify，因此只做 drain 的私有副本并非隔离演练。副本验证使用 bubblewrap：宿主根只读、只有维护目录可写、独立网络、屏蔽 user/system bus；新生成的副本令牌，禁止接触真实部署控制面。允许副本 Unknown 的观察错误描述变化，不允许状态/owner/generation/target、历史 request/receipt/command 或 schema 变化。
 
 复审 PASS：这项调整保留同一所有权和冻结执行器，既不把 Unknown 当停止，也不为了维护人工释放 lane。实际切换只恢复原协调器的正常观察行为，并逐项核对；启动后 Unknown 仍须由独立证据解决。本轮不解决该开发部署问题。
+
+## 16. 独立任务持续运行时的协调器维护复审
+
+本节取代 §15 对非 Unknown 活动执行一律等待的维护 gate，其余所有权和隔离要求仍适用。
+
+生产构建持续超过二十分钟。等待整轮构建并不是所有权不变量的要求；GitHub 和本机对下载的正式包均已验证“独立 systemd 部署期间重启协调器、只有一次 dispatch、任务继续并最终验证”。现场生产 run 处于 Running/Deploying，dispatch 已 acknowledged；实际 worker 与协调器属于两个独立 user units/cgroups。
+
+复审 PASS，允许使用相同机制维护：必须先 drain；所有命令 acknowledged，无 Dispatching/CancelRequested/Verifying 操作；每个 Running/Deploying run 的 executor_ref 是已存在独立 systemd 单元，MainPID/InvocationID/ControlGroup/ActiveState/SubState 在停协调器后和新协调器就绪后相同。新进程必须保留同 DB、active_run_id/generation、配置指纹、冻结 target、原 hooks；请求/receipt/command 和 schema 比对仍通过。Unknown 所有权继续保留。任何检查失败恢复旧协调器，不动执行器或回退数据库。
+
+隔离副本已使用正式 binary、只读宿主根、独立 network/PID/IPC、私有 /run、清空环境及合成令牌；仅 shadow 子目录可写。因真实 bus 不可访问，副本中的 Running 可以变 Unknown，但必须保留 owner/phase/generation/target，历史请求/receipt/command不变；这不修改真实账本。实际服务恢复原有 Observe，不触发新的 dispatch；本次维护不提交发布、重试、取消或 resolve 请求。

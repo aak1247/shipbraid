@@ -4,7 +4,7 @@
 
 - Design/review: [design.md](design.md) §13
 - Owner: Codex；子任务按用户指定使用 gpt-6-luna max
-- Date: 2026-10-17; Status: ACTIVE; Review gate: PASS
+- Date: 2026-10-17; Status: COMPLETE; Review gate: PASS
 
 ## 2. Scope Lock
 
@@ -41,19 +41,19 @@ Shipbraid 删除专属适配/安装/LAN unit，更新相关文档和检查；通
 
 ### T-004 — 协调器安全切换
 
-- Status: IN_PROGRESS; Owner: Codex; Priority: P0; Requirements: FR-004/005,NFR-001/003
+- Status: DONE; Owner: Codex; Priority: P0; Requirements: FR-004/005,NFR-001/003
 - Details: 现场再次检查，drain、备份，私有副本禁调度验证兼容，切 ExecStart/Dashboard、重启并只读核对；保留原配置和回退工件。
 - Range: 原 auto-deliver 用户服务、配置/dashboard路径、私有版本目录和CLI链接；保留hook/账本/令牌值。
 - Dependencies: T-003；Risk: 新活动/unknown必须保留所有权，不强杀/换空库。
-- Evidence: 待补（只存无秘密摘要）。
-- Completion: [ ] 实际进程hash等于Release资产；[ ] 原账本/参数/指纹/请求结果保持；[ ] 无新增业务部署。
+- Evidence: [现场验收 JSON](../../acceptance/github-release-v0.3.1-cutover.json)。下载的正式包先在本机六项合成验收通过，再通过隔离真实账本副本验证。实际 `auto-deliver.service` 进程 hash 为官方 `252bd339…5933cd`、API 为 0.3.1；18 requests/17 runs/7 receipts/24 commands 切换前后相同，两个 lane 身份、指纹、必填参数、原凭据及跨 lane 403 保持；Dashboard HTML+4 assets hash匹配，LAN ready。生产独立 worker 的 PID/InvocationID/cgroup 均相同且继续 Running/Deploying，开发 Unknown gen14保留；维护 drain 恢复 false，CLI指向官方binary。私有备份及旧版本均保留；未提交发布/重试/取消/resolve。
+- Completion: [x] 实际进程hash等于Release资产；[x] 原账本/参数/指纹/请求结果保持；[x] 本次维护未发起业务部署。
 
 ## 4. TODO Board
 
 - [x] T-001 DONE AutoTask迁入
 - [x] T-002 DONE 通用仓库清理
 - [x] T-003 DONE GitHub发行
-- [ ] T-004 IN_PROGRESS 现场切换
+- [x] T-004 DONE 现场切换
 
 ## 5. Milestones
 
@@ -75,3 +75,7 @@ M1 项目归属与通用发行；M2 已发布Release工件；M3 实际协调器�
 GitHub tag `v0.3.0` 的 main/tag checks 均通过，但 release 验收在 HTTP fixture 的重启计数竞争上失败（run `39001960834`）。遗留 handler 持有旧 record，释放 gate 后覆盖新 verify_count；修复 fixture 的共享临界区，再发布 `0.3.1`，不移动既有 tag、不跳过验收。
 
 现场准备：已下载并冻结官方 v0.3.1 新目录；维护 drain 已启用，保留原值以便结束后恢复。现有生产任务 `98d90d06-77da-469f-9af7-a913ac92db8a` 继续执行，未被取消；开发 Unknown 保留。待生产任务结束再做隔离副本与实际切换，尚不声称现场已升级。
+
+维护方案更新（设计 §16，PASS）：生产业务构建较长，已验证独立执行器重启兼容性，改为仅重启协调器并逐项比对 worker fence；无需把业务整个完成作为协调器维护前提。隔离 shadow 已实际通过：同 schema、lane 配置/参数、owner、历史请求/receipt/command 保持；真实账本未被副本修改。
+
+最终结果：四项任务完成，官方 Release 已实际用于 AutoTask 协调器和 Dashboard。协调器服务身份、账本、hooks 和权限保持；仍在进行的业务发布由原执行器继续，业务发布结果不属于此次协调器升级的完成条件。共享主工作树 WIP 保留，main 变更由独立 release worktree 推送。

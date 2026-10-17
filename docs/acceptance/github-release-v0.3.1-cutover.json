@@ -1,0 +1,61 @@
+{
+  "archive_sha256": "f6edd8b4060873fcc72c77407bedd41e6384ea7c621368bc4e43f600756b2c10",
+  "artifact_source": "published GitHub Release, downloaded after publication",
+  "binary_sha256": "252bd33920e55abb3489c7c972f04f972ac689e992c1c3065055c758bd5933cd",
+  "config_changed_keys": [
+    "dashboard_dir"
+  ],
+  "counts": {
+    "commands": 24,
+    "lanes": 2,
+    "receipts": 7,
+    "requests": 18,
+    "runs": 17
+  },
+  "credentials_unchanged": true,
+  "dashboard_asset_count": 4,
+  "independent_running_worker": {
+    "generation": 10,
+    "phase": "deploying",
+    "run_id": "98d90d06-77da-469f-9af7-a913ac92db8a",
+    "same_cgroup": true,
+    "same_invocation_id": true,
+    "same_pid": true,
+    "state": "running"
+  },
+  "lan_ready": true,
+  "lane_scope_checks_passed": true,
+  "maintenance_retry_cancel_resolve_calls": 0,
+  "maintenance_submitted_deployments": 0,
+  "preexisting_unknown_preserved": {
+    "generation": 14,
+    "run_id": "fa005ed0-8661-43f1-86d4-bfb5aee716fe"
+  },
+  "preserved_lane_ownership": true,
+  "preserved_request_receipt_command_records": true,
+  "private_backup_retained": true,
+  "release_url": "https://github.com/aak1247/shipbraid/releases/tag/v0.3.1",
+  "restored_draining": false,
+  "same_schema": true,
+  "shadow": {
+    "active_observation_isolated": true,
+    "counts": {
+      "commands": 24,
+      "lanes": 2,
+      "receipts": 7,
+      "requests": 18,
+      "runs": 17
+    },
+    "draining": true,
+    "isolated_network": true,
+    "masked_user_bus": true,
+    "read_only_host": true,
+    "same_schema": true,
+    "unchanged_ownership": true,
+    "unchanged_requests_receipts_commands": true,
+    "version": "0.3.1"
+  },
+  "source_commit": "8d35bd326f8c629e38ade4444110110bd4fb6f51",
+  "verified_at": "2026-10-17T08:08:24.734713+00:00",
+  "version": "0.3.1"
+}
