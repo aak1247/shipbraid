@@ -2,7 +2,7 @@
 
 ## 1. Document Control
 
-- Version: 1; Author / Reviewer: Codex（同会话自审）
+- Version: 2; Author / Reviewer: Codex（同会话自审）
 - Date: 2026-10-17; Status: APPROVED; Review gate: PASS（§13）
 - Plan: [execution-plan.md](execution-plan.md)
 
@@ -27,7 +27,7 @@ Shipbraid 用户只安装二进制并配置通用 hooks。AutoTask 维护者在�
 - FR-001: Shipbraid 当前 Git 快照不含 AutoTask 专用可执行代码或主机绑定 LAN units；历史记录保留。
 - FR-002: AutoTask 仓库保存当前已审查的开发/生产/未交接恢复适配器及测试，源代码归属清晰；不改写运行中的冻结副本。
 - FR-003: 正式发行包含线上现有通用参数能力、所有权与协议兼容；基于已提交远端 main 整合上一轮发行工具，发行 tag 与 package version 一致。
-- FR-004: GitHub Release 工件下载后校验 sidecar 与 manifest；先 drain、确认无活动 run、在线备份账本和私有配置，原子切换 unit override/UI 路径，保留回退记录。
+- FR-004: GitHub Release 工件下载后校验 sidecar 与 manifest；先 drain、确认无进行中的部署/验证及未确认命令、在线备份账本和私有配置；已有 Unknown 必须保留原所有权，原子切换 unit override/UI 路径，保留回退记录。
 - FR-005: 启动后请求/run/receipt 数量与状态、lane 指纹与参数、凭据作用域相符；已知只读入口可用；不触发业务部署。
 - NFR-001: 不记录秘密，不提交 DB 或私有配置；至少一次交付，unknown 不因超时变为 stopped。
 - NFR-002: main 和 AutoTask vibe 只整合本任务变更；发布在干净独立 worktree，保护共享 WIP。
@@ -37,7 +37,7 @@ Shipbraid 用户只安装二进制并配置通用 hooks。AutoTask 维护者在�
 
 以 `origin/main`（已含通用参数与生产交接修复）建立 `codex/release-decoupling` worktree。迁走项目集成文件，通用 API/调度器不加入业务特例。更新用户文档与 CI，适配器保存在 AutoTask `scripts/shipbraid/`，安装配置不携带秘密。发布新 SemVer 版本，经本地和远端检查后发布 GitHub Release。
 
-线上继续使用现有 `~/.config/auto-deliver/` 和 `~/.local/share/auto-deliver/`，不启第二协调器。旧 hook 路径作为冻结运行资产保留；新源码位置不会改变旧 run 的配置。下载的发行二进制和 web 安装到新私有版本目录，systemd drop-in 只变更 ExecStart，服务 TOML 只变更 dashboard_dir。线上目前 dev/prod 无 active run；迁移前后重新检查，不据第一次快照推断后续状态。
+线上继续使用现有 `~/.config/auto-deliver/` 和 `~/.local/share/auto-deliver/`，不启第二协调器。旧 hook 路径作为冻结运行资产保留；新源码位置不会改变旧 run 的配置。下载的发行二进制和 web 安装到新私有版本目录，systemd drop-in 只变更 ExecStart，服务 TOML 只变更 dashboard_dir。首次快照无 active run，但准备发行期间其他会话启动了生产部署，开发 lane 进入 Unknown；切换前重新检查，不据旧快照推断后续状态。
 
 ## 8. Alternatives and Tradeoffs
 
@@ -70,3 +70,11 @@ Rust fmt/clippy/test；Python 通用与迁入适配器测试；CLI 参数与 hoo
 ## 14. Definition of Design Complete
 
 范围、授权、失败处理和验证明确，review PASS；执行中的状态与最终证据见计划。
+
+## 15. 现场变化后的设计补充与复审
+
+准备期间出现已有开发 Unknown 与其他会话触发的生产部署。等待正在进行的部署/验证结束，不取消、不重试、不清除 Unknown。Unknown 可能长期存在；它不等于协调器不能维护，而是其执行权必须完整保留。切换 gate 调整为：没有非 Unknown 的活动执行、没有 Pending/Delivered/Unknown 命令，保留既有 Unknown 的 active_run_id/generation、原 DB、hook 路径及 lane 指纹。
+
+代码复核：Service::open 对已有 Unknown 不做恢复重放，register_lane 保留 active_run_id/generation，reconcile 对 Unknown 返回 Blocked。scheduler 在 drain 时仍会 Observe，并可能调用 failure_observe/Verify，因此只做 drain 的私有副本并非隔离演练。副本验证使用 bubblewrap：宿主根只读、只有维护目录可写、独立网络、屏蔽 user/system bus；新生成的副本令牌，禁止接触真实部署控制面。允许副本 Unknown 的观察错误描述变化，不允许状态/owner/generation/target、历史 request/receipt/command 或 schema 变化。
+
+复审 PASS：这项调整保留同一所有权和冻结执行器，既不把 Unknown 当停止，也不为了维护人工释放 lane。实际切换只恢复原协调器的正常观察行为，并逐项核对；启动后 Unknown 仍须由独立证据解决。本轮不解决该开发部署问题。
