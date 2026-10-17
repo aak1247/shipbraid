@@ -145,6 +145,13 @@ components = ["app"]
             value = get_request(identifier)
             return value if value["status"] == "satisfied" else None
 
+        def cli(*arguments):
+            cli_env = {key: value for key, value in env.items() if not key.startswith("SHIPBRAID_")}
+            cli_env.update(SHIPBRAID_TOKEN=operator, SHIPBRAID_URL=url)
+            result = subprocess.run([binary, "--json", *arguments], env=cli_env, text=True, capture_output=True, timeout=10)
+            assert result.returncode == 0, (arguments[0], result.returncode)
+            return json.loads(result.stdout)
+
         try:
             start()
             request("/v1/lanes", token=None, expected=401)
@@ -180,6 +187,10 @@ components = ["app"]
             normal = submit(revisions[1], coverage="descendant")
             active = wait_for(lambda: get_request(normal["id"]).get("current_run_id"))
             wait_for(lambda: request(f"/v1/runs/{active}")["state"] == "running")
+            old_logs = cli("logs", "request", normal["id"])
+            assert old_logs["run_id"] == active and old_logs["items"]
+            assert cli("logs", "run", active)["items"] == old_logs["items"]
+            assert cli("logs", active)["items"] == old_logs["items"]
             urgent = submit(revisions[2], "urgent", "descendant")
             wait_for(lambda: request(f"/v1/runs/{active}")["state"] == "superseded")
             old_result = wait_for(lambda: satisfied(normal["id"]))
@@ -187,12 +198,29 @@ components = ["app"]
             assert old_result["satisfied_by_receipt"] == new_result["satisfied_by_receipt"]
             assert old_result["satisfied_by_run"] != active
             report["checks"].append("urgent descendant supersedes stoppable normal run; both requests settle from successor receipt")
+            new_logs = cli("logs", "request", normal["id"], "--cursor", old_logs["next_cursor"])
+            successor = old_result["satisfied_by_run"]
+            assert new_logs["run_id"] == successor
+            assert new_logs["items"] == cli("logs", "run", successor)["items"]
+            empty = cli("logs", "request", normal["id"], "--cursor", new_logs["next_cursor"])
+            assert empty["items"] == [] and empty["next_cursor"] == new_logs["next_cursor"]
+            page = request(f"/v1/requests/{normal['id']}/logs?limit=1")
+            assert len(page["items"]) == 1
+            rest = request(f"/v1/requests/{normal['id']}/logs?cursor={page['next_cursor']}")
+            assert page["items"] + rest["items"] == new_logs["items"]
+            fixed = cli("logs", "run", active)
+            assert fixed["run_id"] == active
+            assert all(item["sequence"] > old_logs["items"][-1]["sequence"] for item in cli("logs", "run", active, "--after", str(old_logs["items"][-1]["sequence"]))["items"])
+            report["checks"].append("CLI logs run/request paginate; request cursor follows successor from its first log; run query stays fixed")
             pending = submit(revisions[3], coverage="descendant")
             running = wait_for(lambda: get_request(pending["id"]).get("current_run_id"))
             wait_for(lambda: request(f"/v1/runs/{running}")["state"] == "running")
             covered = submit(revisions[3], priority="urgent")
             assert get_request(covered["id"])["current_run_id"] == running
             assert request(f"/v1/runs/{running}")["effective_priority"] == "urgent"
+            withdrawn_observer = submit(revisions[3])
+            assert get_request(withdrawn_observer["id"])["current_run_id"] == running
+            request(f"/v1/requests/{withdrawn_observer['id']}/withdraw", {})
             run_before_unknown = request(f"/v1/runs/{running}")
             request("/v1/executor-events", {"run_id":running,"generation":run_before_unknown["generation"],"event":"unknown","executor_ref":run_before_unknown["executor_ref"],"reason":"synthetic observation uncertainty"}, token=executor)
             assert request("/v1/lanes/synthetic-test")["active_run_id"] == running
@@ -215,6 +243,9 @@ components = ["app"]
             report["checks"].append("SIGKILL/restart observes durable scripted execution without creating replacement run")
             logs = request(f"/v1/runs/{running}/logs?after=0&limit=200")
             assert logs["items"] and logs["next_cursor"] > 0
+            withdrawn_logs = cli("logs", "request", withdrawn_observer["id"])
+            assert withdrawn_logs["run_id"] == running and withdrawn_logs["items"] == logs["items"]
+            report["checks"].append("request logs remain readable after satisfaction and withdrawal without affecting shared runs")
             events = request("/v1/events?lane_id=synthetic-test&after=0&limit=200")["items"]
             assert events and [item["sequence"] for item in events] == sorted(item["sequence"] for item in events)
             request("/v1/drain", {})
@@ -248,6 +279,9 @@ components = ["app"]
             request("/v1/executor-events", failure_event, token=executor)
             assert get_request(failing["id"])["status"] == "needs_attention"
             assert request("/v1/lanes/synthetic-test")["active_run_id"] is None
+            failed_logs = cli("logs", "request", failing["id"])
+            assert failed_logs["run_id"] == failed_run
+            assert failed_logs["items"] == cli("logs", "run", failed_run)["items"]
             waiting = submit(revisions[1])
             time.sleep(0.2)
             assert get_request(waiting["id"])["current_run_id"] is None
@@ -256,7 +290,11 @@ components = ["app"]
             retried = wait_for(lambda: satisfied(failing["id"]))
             assert retried["manual_retries_used"] == 1 and retried["revision"] == revisions[1]
             assert wait_for(lambda: satisfied(waiting["id"]))["satisfied_by_receipt"] == retried["satisfied_by_receipt"]
+            retried_logs = cli("logs", "request", failing["id"], "--cursor", failed_logs["next_cursor"])
+            assert retried_logs["run_id"] == retried["satisfied_by_run"] != failed_run
+            assert retried_logs["items"] == cli("logs", "run", retried["satisfied_by_run"])["items"]
             report["checks"].append("executor role enforced; confirmed failure pauses lane; new requests do not unpause; explicit retry preserves target")
+            report["checks"].append("failed-request logs remain readable and saved cursor switches to the retried run")
             print(json.dumps(report, indent=2))
         except Exception:
             log.flush()

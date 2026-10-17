@@ -221,6 +221,14 @@ def main():
             wait_for(lambda: stopped(unit))
             report['checks'].append('coordinator restart during an independent systemd deployment preserves one dispatch and a verified receipt')
 
+            request_logs = cli('logs', 'request', identifier)
+            assert request_logs['run_id'] == run and request_logs['items']
+            assert cli('logs', 'run', run)['items'] == request_logs['items']
+            assert cli('logs', run)['items'] == request_logs['items']
+            resumed_logs = cli('logs', 'request', identifier, '--cursor', request_logs['next_cursor'])
+            assert resumed_logs['items'] == [] and resumed_logs['next_cursor'] == request_logs['next_cursor']
+            report['checks'].append('packaged request logs retain their run after satisfaction; legacy and explicit run CLI agree and cursors resume without duplicates')
+
             # Replay the retained immutable envelope as a read-only verify after changing actual environment.
             request_files = list((prefix / 'var/runs' / run).rglob('request.json'))
             assert len(request_files) == 1, request_files

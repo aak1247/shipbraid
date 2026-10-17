@@ -113,10 +113,17 @@ enum Command {
         #[arg(long, default_value_t = 0)]
         after: u64,
     },
+    /// Query a fixed run or the request's current run.
+    #[command(subcommand_negates_reqs = true)]
     Logs {
-        run_id: String,
-        #[arg(long, default_value_t = 0)]
-        after: u64,
+        /// Legacy shorthand for `logs run RUN_ID`.
+        #[arg(required = true)]
+        run_id: Option<String>,
+        /// Numeric sequence cursor for the legacy run-log shorthand.
+        #[arg(long, requires = "run_id")]
+        after: Option<u64>,
+        #[command(subcommand)]
+        target: Option<LogTarget>,
     },
     Withdraw {
         request_id: String,
@@ -148,6 +155,22 @@ enum Command {
     },
     /// Check process readiness without credentials.
     Health,
+}
+#[derive(Subcommand)]
+enum LogTarget {
+    /// Query one run's logs using its numeric sequence cursor.
+    Run {
+        run_id: String,
+        #[arg(long, default_value_t = 0)]
+        after: u64,
+    },
+    /// Query the current run; a saved cursor resets when the request changes runs.
+    Request {
+        request_id: String,
+        /// Opaque next_cursor from the preceding request-log response.
+        #[arg(long)]
+        cursor: Option<String>,
+    },
 }
 #[derive(Clone, ValueEnum)]
 enum Coverage {
@@ -218,6 +241,45 @@ impl CliFailure {
             idempotency_key: None,
         }
     }
+}
+impl Cli {
+    fn validate(&self) -> std::result::Result<(), CliFailure> {
+        match &self.command {
+            Command::Logs {
+                run_id,
+                after,
+                target: Some(_),
+            } if run_id.is_some() || after.is_some() => Err(CliFailure::new(
+                "invalid_arguments",
+                "Use either legacy logs syntax or an explicit logs subcommand, not both.",
+                false,
+            )),
+            Command::Logs {
+                run_id: None,
+                target: None,
+                ..
+            } => Err(CliFailure::new(
+                "invalid_arguments",
+                "Specify a run ID or an explicit logs subcommand.",
+                false,
+            )),
+            _ => Ok(()),
+        }
+    }
+}
+#[derive(Debug)]
+enum CliParseError {
+    Clap(clap::Error),
+    Validation(CliFailure),
+}
+fn parse_cli<I, T>(arguments: I) -> std::result::Result<Cli, CliParseError>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(arguments).map_err(CliParseError::Clap)?;
+    cli.validate().map_err(CliParseError::Validation)?;
+    Ok(cli)
 }
 impl std::fmt::Display for CliFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -433,6 +495,28 @@ fn segment(value: &str) -> Result<&str> {
     }
     Ok(value)
 }
+fn run_logs_path(run_id: &str, after: u64) -> Result<String> {
+    Ok(format!(
+        "/v1/runs/{}/logs?after={after}&limit=200",
+        segment(run_id)?
+    ))
+}
+fn request_logs_path(
+    base: &reqwest::Url,
+    request_id: &str,
+    cursor: Option<&str>,
+) -> Result<String> {
+    let path = format!("/v1/requests/{}/logs", segment(request_id)?);
+    let mut url = base.join(path.trim_start_matches('/'))?;
+    {
+        let mut query = url.query_pairs_mut();
+        query.append_pair("limit", "200");
+        if let Some(cursor) = cursor {
+            query.append_pair("cursor", cursor);
+        }
+    }
+    Ok(format!("{path}?{}", url.query().unwrap_or_default()))
+}
 fn output(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -448,9 +532,17 @@ async fn main() -> std::process::ExitCode {
         .init();
     let arguments: Vec<_> = std::env::args_os().collect();
     let machine_mode = arguments.iter().any(|argument| argument == "--json");
-    let cli = match Cli::try_parse_from(arguments) {
+    let cli = match parse_cli(arguments) {
         Ok(cli) => cli,
-        Err(error) => {
+        Err(CliParseError::Validation(failure)) => {
+            if machine_mode {
+                let _ = output(&json!({"error": failure}));
+            } else {
+                eprintln!("{failure}");
+            }
+            return std::process::ExitCode::from(2);
+        }
+        Err(CliParseError::Clap(error)) => {
             if machine_mode
                 && !matches!(
                     error.kind(),
@@ -484,6 +576,7 @@ async fn main() -> std::process::ExitCode {
 }
 
 async fn run(cli: Cli) -> Result<u8> {
+    cli.validate()?;
     if let Command::Serve { config } = &cli.command {
         shipbraid::service::serve(shipbraid::config::Config::load(config)?).await?;
         return Ok(0);
@@ -746,13 +839,28 @@ async fn run(cli: Cli) -> Result<u8> {
             );
             api.get(&path).await?
         }
-        Command::Logs { run_id, after } => {
-            api.get(&format!(
-                "/v1/runs/{}/logs?after={after}&limit=200",
-                segment(&run_id)?
-            ))
-            .await?
-        }
+        Command::Logs {
+            run_id,
+            after,
+            target,
+        } => match target {
+            Some(LogTarget::Run { run_id, after }) => {
+                api.get(&run_logs_path(&run_id, after)?).await?
+            }
+            Some(LogTarget::Request { request_id, cursor }) => {
+                api.get(&request_logs_path(
+                    &api.base,
+                    &request_id,
+                    cursor.as_deref(),
+                )?)
+                .await?
+            }
+            None => {
+                let run_id = run_id.context("run ID is required for legacy log syntax")?;
+                api.get(&run_logs_path(&run_id, after.unwrap_or(0))?)
+                    .await?
+            }
+        },
         Command::Withdraw { request_id } => {
             api.post(
                 &format!("/v1/requests/{}/withdraw", segment(&request_id)?),
@@ -885,6 +993,121 @@ mod tests {
         );
         assert!(Cli::try_parse_from(["shipbraid", "list", "request", "--limit", "201"]).is_err());
         assert!(Cli::try_parse_from(["shipbraid", "system"]).is_ok());
+    }
+    #[test]
+    fn logs_keep_legacy_run_syntax_and_parse_explicit_targets() {
+        let legacy = parse_cli(["shipbraid", "logs", "run-123", "--after", "42"]).unwrap();
+        let Command::Logs {
+            run_id,
+            after,
+            target,
+        } = legacy.command
+        else {
+            panic!("expected logs command");
+        };
+        assert_eq!(run_id.as_deref(), Some("run-123"));
+        assert_eq!(after, Some(42));
+        assert!(target.is_none());
+
+        let legacy_default = parse_cli(["shipbraid", "logs", "run-123"]).unwrap();
+        assert!(matches!(
+            legacy_default.command,
+            Command::Logs {
+                run_id: Some(ref run_id),
+                after: None,
+                target: None,
+            } if run_id == "run-123"
+        ));
+
+        let explicit_run =
+            parse_cli(["shipbraid", "logs", "run", "run-456", "--after", "7"]).unwrap();
+        assert!(matches!(
+            explicit_run.command,
+            Command::Logs {
+                run_id: None,
+                target: Some(LogTarget::Run { ref run_id, after: 7 }),
+                ..
+            } if run_id == "run-456"
+        ));
+
+        let request = parse_cli([
+            "shipbraid",
+            "--json",
+            "logs",
+            "request",
+            "request-789",
+            "--cursor",
+            "opaque.cursor",
+        ])
+        .unwrap();
+        assert!(matches!(
+            request.command,
+            Command::Logs {
+                run_id: None,
+                target: Some(LogTarget::Request {
+                    ref request_id,
+                    cursor: Some(ref cursor),
+                }),
+                ..
+            } if request_id == "request-789" && cursor == "opaque.cursor"
+        ));
+
+        assert!(parse_cli(["shipbraid", "logs"]).is_err());
+        assert!(parse_cli(["shipbraid", "logs", "--after", "7"]).is_err());
+        assert!(matches!(
+            parse_cli(["shipbraid", "logs", "run-123", "run", "run-456"]),
+            Err(CliParseError::Validation(CliFailure { code, .. }))
+                if code == "invalid_arguments"
+        ));
+        assert!(matches!(
+            parse_cli([
+                "shipbraid",
+                "logs",
+                "--after",
+                "7",
+                "request",
+                "request-789"
+            ]),
+            Err(CliParseError::Validation(CliFailure { code, .. }))
+                if code == "invalid_arguments"
+        ));
+    }
+    #[test]
+    fn logs_accept_global_json_before_and_after_nested_commands() {
+        let cases: [&[&str]; 6] = [
+            &["shipbraid", "--json", "logs", "request", "request-1"],
+            &["shipbraid", "logs", "--json", "request", "request-1"],
+            &["shipbraid", "logs", "request", "--json", "request-1"],
+            &["shipbraid", "logs", "request", "request-1", "--json"],
+            &["shipbraid", "logs", "--json", "run", "run-1"],
+            &["shipbraid", "logs", "run", "run-1", "--json"],
+        ];
+        for arguments in cases {
+            let cli = parse_cli(arguments.iter().copied()).unwrap();
+            assert!(cli.json, "failed to parse: {arguments:?}");
+            assert!(matches!(
+                cli.command,
+                Command::Logs {
+                    target: Some(_),
+                    ..
+                }
+            ));
+        }
+    }
+    #[test]
+    fn request_log_cursor_is_encoded_as_one_query_value() {
+        let base = reqwest::Url::parse("https://coordinator.example/prefix/").unwrap();
+        let cursor = "opaque+/=& cursor λ";
+        let path = request_logs_path(&base, "request-123", Some(cursor)).unwrap();
+        let url = base.join(path.trim_start_matches('/')).unwrap();
+        let pairs: Vec<_> = url.query_pairs().into_owned().collect();
+        assert_eq!(
+            pairs,
+            vec![
+                ("limit".to_owned(), "200".to_owned()),
+                ("cursor".to_owned(), cursor.to_owned())
+            ]
+        );
     }
     #[test]
     fn api_rejects_urls_with_embedded_credentials() {

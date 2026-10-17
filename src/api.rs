@@ -331,8 +331,71 @@ struct Items<T> {
 
 #[derive(Debug, Serialize)]
 struct LogPage {
+    run_id: Uuid,
     items: Vec<LogItem>,
     next_cursor: u64,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RequestLogQuery {
+    cursor: Option<String>,
+    limit: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct RequestLogPage {
+    request_id: Uuid,
+    run_id: Option<Uuid>,
+    items: Vec<LogItem>,
+    next_cursor: Option<String>,
+}
+
+struct RequestLogCursor {
+    request_id: Uuid,
+    run_id: Uuid,
+    sequence: u64,
+}
+
+impl RequestLogCursor {
+    fn encode(&self) -> String {
+        format!(
+            "v1.{}.{}.{}",
+            self.request_id.simple(),
+            self.run_id.simple(),
+            self.sequence
+        )
+    }
+
+    fn decode(value: &str, request_id: Uuid) -> Result<Self, ApiError> {
+        let invalid = || {
+            ApiError::bad_request(
+                "invalid_cursor",
+                "cursor must be a request-log cursor for this request.",
+            )
+        };
+        if value.len() > 100 {
+            return Err(invalid());
+        }
+        let mut parts = value.split('.');
+        if parts.next() != Some("v1") {
+            return Err(invalid());
+        }
+        let cursor = Self {
+            request_id: Uuid::parse_str(parts.next().ok_or_else(invalid)?)
+                .map_err(|_| invalid())?,
+            run_id: Uuid::parse_str(parts.next().ok_or_else(invalid)?).map_err(|_| invalid())?,
+            sequence: parts
+                .next()
+                .ok_or_else(invalid)?
+                .parse()
+                .map_err(|_| invalid())?,
+        };
+        if parts.next().is_some() || cursor.request_id != request_id {
+            return Err(invalid());
+        }
+        Ok(cursor)
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -367,6 +430,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/lanes/{lane_id}/resolve-unknown", post(resolve_unknown))
         .route("/requests", get(list_requests).post(create_request))
         .route("/requests/{request_id}", get(get_request))
+        .route("/requests/{request_id}/logs", get(request_logs))
         .route("/requests/{request_id}/withdraw", post(withdraw_request))
         .route("/requests/{request_id}/retry", post(retry_request))
         .route("/requests/{request_id}/priority", post(set_priority))
@@ -726,6 +790,74 @@ async fn list_events(
     Ok(Json(Items { items }))
 }
 
+async fn request_logs(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(request_id): Path<String>,
+    query: Result<Query<RequestLogQuery>, QueryRejection>,
+) -> Result<Json<RequestLogPage>, ApiError> {
+    require_non_executor(&actor)?;
+    let id = parse_uuid(&request_id)?;
+    // Resolve the request and read its run/logs from one consistent snapshot.
+    let snapshot = state.service.snapshot().await;
+    let request = snapshot
+        .requests
+        .get(&id)
+        .ok_or_else(|| ApiError::missing("Request not found."))?;
+    require_lane_id(&actor, &request.lane_id, &snapshot)?;
+    let Query(query) = query.map_err(|_| {
+        ApiError::bad_request(
+            "invalid_query",
+            "Supply cursor and an optional numeric limit.",
+        )
+    })?;
+    let cursor = query
+        .cursor
+        .as_deref()
+        .map(|cursor| RequestLogCursor::decode(cursor, id))
+        .transpose()?;
+    let run_id = request
+        .current_run_id
+        .or(request.satisfied_by_run)
+        .or_else(|| {
+            snapshot.events.iter().rev().find_map(|event| {
+                (event.request_id == Some(id) && event.lane_id == request.lane_id)
+                    .then_some(event.run_id)
+                    .flatten()
+            })
+        });
+    let Some(run_id) = run_id else {
+        return Ok(Json(RequestLogPage {
+            request_id: id,
+            run_id: None,
+            items: vec![],
+            next_cursor: None,
+        }));
+    };
+    let run = snapshot
+        .runs
+        .get(&run_id)
+        .ok_or_else(|| ApiError::missing("Run not found."))?;
+    require_lane_id(&actor, &run.lane_id, &snapshot)?;
+    let after = cursor
+        .filter(|cursor| cursor.run_id == run_id)
+        .map_or(0, |cursor| cursor.sequence);
+    let page = log_page(&snapshot, run_id, after, bounded_limit(query.limit));
+    Ok(Json(RequestLogPage {
+        request_id: id,
+        run_id: Some(run_id),
+        items: page.items,
+        next_cursor: Some(
+            RequestLogCursor {
+                request_id: id,
+                run_id,
+                sequence: page.next_cursor,
+            }
+            .encode(),
+        ),
+    }))
+}
+
 async fn run_logs(
     State(state): State<ApiState>,
     axum::extract::Extension(actor): axum::extract::Extension<Actor>,
@@ -740,8 +872,15 @@ async fn run_logs(
         .get(&id)
         .ok_or_else(|| ApiError::missing("Run not found."))?;
     require_lane_id(&actor, &run.lane_id, &snapshot)?;
-    let after = query.after.unwrap_or_default();
-    let limit = bounded_limit(query.limit);
+    Ok(Json(log_page(
+        &snapshot,
+        id,
+        query.after.unwrap_or_default(),
+        bounded_limit(query.limit),
+    )))
+}
+
+fn log_page(snapshot: &DomainState, id: Uuid, after: u64, limit: usize) -> LogPage {
     let selected: Vec<&Event> = snapshot
         .events
         .iter()
@@ -774,7 +913,11 @@ async fn run_logs(
             }
         })
         .collect();
-    Ok(Json(LogPage { items, next_cursor }))
+    LogPage {
+        run_id: id,
+        items,
+        next_cursor,
+    }
 }
 
 async fn create_request(
@@ -1649,6 +1792,116 @@ mod tests {
                 panic!("non-JSON response: {}", String::from_utf8_lossy(&bytes))
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn request_logs_enforce_scope_and_reset_stale_run_cursors() {
+        let f = team_fixture().await;
+        let (_, request) = f.submit("alice", "request-logs", f.body()).await;
+        let id = request["id"].as_str().unwrap();
+        let path = format!("/v1/requests/{id}/logs");
+        let (status, page) = f.call("bob", "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(
+            page,
+            json!({"request_id":id,"run_id":null,"items":[],"next_cursor":null})
+        );
+        for actor in ["outside", "executor"] {
+            let (status, _) = f.call(actor, "GET", &path, None).await;
+            assert_eq!(status, StatusCode::FORBIDDEN);
+        }
+        let response = send(f.app.clone(), "GET", &path, None, None).await;
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+        for query in [
+            "cursor=bad",
+            "cursor=1",
+            "limit=bad",
+            "limit=-1",
+            "after=10",
+        ] {
+            let (status, _) = f
+                .call("alice", "GET", &format!("{path}?{query}"), None)
+                .await;
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{query}");
+        }
+        let cursor = RequestLogCursor {
+            request_id: Uuid::new_v4(),
+            run_id: Uuid::new_v4(),
+            sequence: 1,
+        }
+        .encode();
+        let (status, error) = f
+            .call("alice", "GET", &format!("{path}?cursor={cursor}"), None)
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(error["code"], "invalid_cursor");
+        let (status, _) = f
+            .call(
+                "alice",
+                "GET",
+                &format!("/v1/requests/{}/logs", Uuid::new_v4()),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Let the fixture's coalescing window elapse, then dispatch once. No
+        // scheduler runs in the background, so the log pages remain stable.
+        tokio::time::sleep(std::time::Duration::from_millis(2100)).await;
+        f.service.scheduler_tick().await.unwrap();
+        let (status, first) = f.call("alice", "GET", &path, None).await;
+        assert_eq!(status, StatusCode::OK);
+        let run_id = first["run_id"].as_str().unwrap();
+        assert!(!first["items"].as_array().unwrap().is_empty());
+        let stale = RequestLogCursor {
+            request_id: Uuid::parse_str(id).unwrap(),
+            run_id: Uuid::new_v4(),
+            // A sequence above every log verifies that changing runs really
+            // resets the cursor, even when the selected run has older logs.
+            sequence: u64::MAX,
+        }
+        .encode();
+        let (status, reset) = f
+            .call("alice", "GET", &format!("{path}?cursor={stale}"), None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(reset, first);
+        let (_, fixed) = f
+            .call("alice", "GET", &format!("/v1/runs/{run_id}/logs"), None)
+            .await;
+        assert_eq!(reset["items"], fixed["items"]);
+        let (_, empty) = f
+            .call(
+                "alice",
+                "GET",
+                &format!("{path}?cursor={}", first["next_cursor"].as_str().unwrap()),
+                None,
+            )
+            .await;
+        assert_eq!(empty["items"], json!([]));
+        assert_eq!(empty["next_cursor"], first["next_cursor"]);
+    }
+
+    #[test]
+    fn request_log_cursors_are_bounded_and_request_scoped() {
+        let request_id = Uuid::new_v4();
+        let cursor = RequestLogCursor {
+            request_id,
+            run_id: Uuid::new_v4(),
+            sequence: u64::MAX,
+        };
+        let encoded = cursor.encode();
+        let decoded = RequestLogCursor::decode(&encoded, request_id).unwrap();
+        assert_eq!(decoded.run_id, cursor.run_id);
+        assert_eq!(decoded.sequence, u64::MAX);
+        assert!(RequestLogCursor::decode(&encoded, Uuid::new_v4()).is_err());
+        for value in [
+            format!("{encoded}.extra"),
+            encoded.replace("v1.", "v2."),
+            "x".repeat(101),
+        ] {
+            assert!(RequestLogCursor::decode(&value, request_id).is_err());
+        }
     }
 
     #[tokio::test]
