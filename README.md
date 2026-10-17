@@ -53,10 +53,10 @@ Shipbraid coordinates release requests while each project keeps its own build an
 Download a published Linux x86_64 GNU bundle and its `.sha256` file from [GitHub Releases](https://github.com/aak1247/shipbraid/releases), verify, and unpack. The bundle includes the CLI/server, prebuilt dashboard, adapters, and installer; users need neither Rust nor Node.js. Maintainers must tag and publish the first public Release before downloads become available; use the version shown on the Releases page.
 
 ```bash
-# Use the version you downloaded; 0.3.0 is shown here.
-sha256sum --check shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd shipbraid-0.3.0-x86_64-unknown-linux-gnu
+# Use the version you downloaded; 0.3.1 is shown here.
+sha256sum --check shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz
+cd shipbraid-0.3.1-x86_64-unknown-linux-gnu
 export SHIPBRAID_BUNDLE="$PWD"
 export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
 shipbraid --version

@@ -208,6 +208,7 @@ class WebhookFixture(ThreadingHTTPServer):
         super().__init__(address, handler)
         self.state_dirs = state_dirs
         self.token = token
+        self.fixture_lock = threading.Lock()
 
 
 class WebhookHandler(BaseHTTPRequestHandler):
@@ -242,7 +243,14 @@ class WebhookHandler(BaseHTTPRequestHandler):
                 self.end_headers()
                 return
 
-            reply, mode = fixture_reply(envelope, state_dir, "webhook")
+            # The coordinator may be restarted while a read-only verification
+            # is blocked at the fixture gate. Serialize the complete fixture
+            # read/modify/write sequence so the old request cannot overwrite
+            # counters or logs written by a newer request. The gate is released
+            # through control.json, which the waiting fixture reads without
+            # taking this lock.
+            with self.server.fixture_lock:
+                reply, mode = fixture_reply(envelope, state_dir, "webhook")
             if mode == "empty_202":
                 self.send_response(202)
                 self.end_headers()

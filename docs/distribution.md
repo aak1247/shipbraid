@@ -8,10 +8,10 @@ Shipbraid 的用户入口是发行包中的 `bin/shipbraid`，同一个程序提
 
 从 [GitHub Releases](https://github.com/aak1247/shipbraid/releases) 选择已发布版本，下载 `.tar.gz` 和对应 `.sha256`。仓库有发行 workflow 不代表已有公开 Release；若列表为空，维护者须完成文末的首次发行步骤。
 
-以下以 `0.3.0` 为例，版本与文件名以实际 Release 为准：
+以下以 `0.3.1` 为例，版本与文件名以实际 Release 为准：
 
 ```bash
-SHIPBRAID_VERSION=0.3.0
+SHIPBRAID_VERSION=0.3.1
 SHIPBRAID_ARCHIVE="shipbraid-${SHIPBRAID_VERSION}-x86_64-unknown-linux-gnu.tar.gz"
 curl --fail --location --remote-name \
   "https://github.com/aak1247/shipbraid/releases/download/v${SHIPBRAID_VERSION}/${SHIPBRAID_ARCHIVE}"
@@ -186,7 +186,7 @@ pnpm --dir web install --frozen-lockfile
 pnpm --dir web build
 python3 scripts/package-release.py
 python3 scripts/acceptance-distribution.py \
-  --bundle target/dist/shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz
+  --bundle target/dist/shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz
 ```
 
 本地包使用本机 ABI；本地验收不等同于官方 Ubuntu 22.04 runner 验收。工作树须完成审查和提交后，再对与 Cargo 版本一致的提交创建 `v<version>` tag，并按项目发布权限推送。Release workflow 会重新检查、构建、验证包并生成 **draft Release**。维护者检查工件后手动发布；不会把未提交修改作为公开 tag 的发行来源。

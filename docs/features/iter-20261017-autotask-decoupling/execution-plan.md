@@ -70,4 +70,6 @@ M1 项目归属与通用发行；M2 已发布Release工件；M3 实际协调器�
 
 ## 8. 发行前检查
 
-基线为已提交 `origin/main=3d5d497`，包含 `646a557` 的通用参数能力及 `073ccaf` 的受控未交接恢复；没有从共享主工作树暂存其他会话的 API/CLI 改动。发布版本定为 `0.3.0`。Rust release 模式 54 library + 6 CLI + 2 ledger tests、fmt、clippy 通过；通用 Python 47 tests、既有模拟/hooks/Agent/CLI 四套验收通过；前端类型检查、10 tests、build 通过。前端复用已安装依赖，直接执行相同 tsc/vitest/vite 工具；pnpm 因跨 worktree 依赖目录保护拒绝自动安装后未删除原依赖。
+基线为已提交 `origin/main=3d5d497`，包含 `646a557` 的通用参数能力及 `073ccaf` 的受控未交接恢复；没有从共享主工作树暂存其他会话的 API/CLI 改动。首轮候选版本为 `0.3.0`。Rust release 模式 54 library + 6 CLI + 2 ledger tests、fmt、clippy 通过；通用 Python 47 tests、既有模拟/hooks/Agent/CLI 四套验收通过；前端类型检查、10 tests、build 通过。前端复用已安装依赖，直接执行相同 tsc/vitest/vite 工具；pnpm 因跨 worktree 依赖目录保护拒绝自动安装后未删除原依赖。
+
+GitHub tag `v0.3.0` 的 main/tag checks 均通过，但 release 验收在 HTTP fixture 的重启计数竞争上失败（run `39001960834`）。遗留 handler 持有旧 record，释放 gate 后覆盖新 verify_count；修复 fixture 的共享临界区，再发布 `0.3.1`，不移动既有 tag、不跳过验收。

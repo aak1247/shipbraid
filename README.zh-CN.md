@@ -53,10 +53,10 @@ Shipbraid 协调发布请求，具体构建与部署由各项目使用自己的�
 从 [GitHub Releases](https://github.com/aak1247/shipbraid/releases) 下载已发布版本的 Linux x86_64 GNU 发行包和 `.sha256`，校验后解压。发行包包含 CLI、服务端、构建好的 Dashboard、适配器和安装器，运行无需 Rust 或 Node.js。首次公开发行需由维护者完成 tag 和 Release 发布；具体版本以 Releases 页面为准。
 
 ```bash
-# 文件名以下载的版本为准；以下以 0.3.0 为例。
-sha256sum --check shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz.sha256
-tar -xzf shipbraid-0.3.0-x86_64-unknown-linux-gnu.tar.gz
-cd shipbraid-0.3.0-x86_64-unknown-linux-gnu
+# 文件名以下载的版本为准；以下以 0.3.1 为例。
+sha256sum --check shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz.sha256
+tar -xzf shipbraid-0.3.1-x86_64-unknown-linux-gnu.tar.gz
+cd shipbraid-0.3.1-x86_64-unknown-linux-gnu
 export SHIPBRAID_BUNDLE="$PWD"
 export PATH="$SHIPBRAID_BUNDLE/bin:$PATH"
 shipbraid --version
