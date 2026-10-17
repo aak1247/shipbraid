@@ -434,7 +434,7 @@ class Acceptance:
 
     def cli(self, token: str, *arguments: str, timeout=20):
         result = subprocess.run(
-            [self.binary, "--url", self.url, "--token", token, *arguments],
+            [self.binary, "--url", self.url, "--token=" + token, *arguments],
             env=self.env,
             capture_output=True,
             text=True,
