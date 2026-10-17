@@ -61,4 +61,4 @@ observe 的 completed 不满足请求。verify 必须重新观察，并与本次
 
 观察器使用 `--state-dir <原生产运行目录> --recovery-record <私有记录>`，核对 mask 身份、两次稳定的 inactive/dead supervisor 状态、空 cgroup/Job、独占 dispatch 锁、原 request 哈希和身份、无匹配 worker、无日志或结果文件。任何不确定仍返回 unknown。通过时只给出新鲜失败证明，不写 result 或成功 receipt，也不运行发布命令。`failure_observe` 不改变原执行 profile，可先收敛旧所有权，再安装修复后的生产 hooks。
 
-安装新的正常 hooks 会改变执行 profile；旧请求保留原 SHA 和参数，并转为 `needs_attention/lane_configuration_changed`，不能偷偷改写目标配置或自动发布。维护后由请求者重新提交明确版本和必填参数。
+安装新的正常 hooks 会改变执行 profile；旧请求保留原 SHA 和参数，并转为 `needs_attention`，不能偷偷改写目标配置或自动发布。维护后由请求者重新提交明确版本和必填参数。

@@ -1,0 +1,58 @@
+{
+  "checked_at": "2026-10-17T02:43:13.153227+00:00",
+  "scope": "Production user-systemd bus repair and independent recovery of one unstarted handoff",
+  "cause": "Sanitized subprocess environment discarded XDG_RUNTIME_DIR and DBUS_SESSION_BUS_ADDRESS after the original request intent was written",
+  "changes": [
+    "Retain trusted process user-bus coordinates only; envelope fields cannot override them",
+    "Read-only user-manager preflight before request intent",
+    "Ambiguous handoff retains durable intent and remains unknown",
+    "Read-only failure observer requires persistent exact-unit admission mask, exclusive original lock, immutable request hash, stable idle supervisor, absent workers and artifacts"
+  ],
+  "verification": {
+    "python_integration_tests": 51,
+    "python_installer_tests": 5,
+    "rust_tests": 62,
+    "cargo_fmt": "passed",
+    "cargo_clippy": "passed",
+    "cargo_test": "passed after moving repair build cache to tmpfs",
+    "real_user_bus_true_unit": "passed",
+    "masked_unit_admission_rejected": true,
+    "installed_adapter_preflight_under_coordinator_environment": "passed"
+  },
+  "recovered_run": {
+    "id": "261a813d-a1d3-4d63-b45b-4d6bb9d4ac14",
+    "generation": 1,
+    "before": "unknown",
+    "after": "failed",
+    "receipt_created": false,
+    "original_request_changed": false,
+    "persistent_unit_mask_retained": true
+  },
+  "queued_request": {
+    "id": "34bfc310-1684-44ec-8028-e436b8e38835",
+    "revision": "31ff6c06b6f7ea0fd74801d552c2d47e92b8b042",
+    "parameters": {
+      "database_backup": "skip"
+    },
+    "status": "needs_attention",
+    "reason": "Frozen executor profile predates repaired immutable production hooks; explicit resubmission is required",
+    "new_run_created": false
+  },
+  "live": {
+    "loopback_live": 200,
+    "loopback_ready": 200,
+    "lan_ready": 200,
+    "development_profile_unchanged": true,
+    "both_lanes_enabled": true,
+    "active_production_run": null,
+    "production_blocked_reason": null,
+    "production_failure_paused": false,
+    "production_generation": 1,
+    "service_automatic_restarts": 0
+  },
+  "limitations": [
+    "No real three-component production rollout was started or claimed successful",
+    "Host root filesystem remains near capacity after removing only this task build cache; disk capacity requires separate maintenance",
+    "High-concurrency latency target remains unfulfilled as documented previously"
+  ]
+}
