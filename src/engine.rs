@@ -1352,6 +1352,9 @@ impl Engine {
             .lanes
             .get_mut(lane_id)
             .ok_or_else(|| DomainError::LaneNotFound(lane_id.to_owned()))?;
+        if !lane.failure_paused && lane.blocked_reason.as_deref() != Some(FAILURE_BLOCK) {
+            return Ok(());
+        }
         lane.failure_paused = false;
         if lane.blocked_reason.as_deref() == Some(FAILURE_BLOCK) {
             lane.blocked_reason = None;
@@ -4787,5 +4790,91 @@ mod tests {
             engine.unpause_lane(&mut state, "nonexistent", time(6)),
             Err(DomainError::LaneNotFound(name)) if name == "nonexistent"
         ));
+
+        // Calling unpause on an already unpaused lane is a no-op and emits no duplicate event
+        let event_count_before = state.events.len();
+        engine.unpause_lane(&mut state, "lane-a", time(7)).unwrap();
+        assert_eq!(state.events.len(), event_count_before);
+    }
+
+    #[test]
+    fn expiring_failed_request_unpauses_lane_when_no_other_needs_attention() {
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut state = setup(&engine, "lane-a");
+        let revision = "a".repeat(40);
+        let request_id = submit(
+            &mut state,
+            &engine,
+            1,
+            "lane-a",
+            &revision,
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            &CoverageContext::default(),
+        );
+        state.requests.get_mut(&request_id).unwrap().deadline_at = Some(time(10));
+        let run_id = dispatched_run(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(2),
+                    ReconcileIds {
+                        run_id: ids(100),
+                        command_id: ids(101),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+        );
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Started {
+                    executor_ref: "exec".to_owned(),
+                },
+                time(3),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Failed {
+                    message: "deploy failed".to_owned(),
+                    environment_known_unchanged: true,
+                },
+                time(4),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.requests[&request_id].status,
+            RequestStatus::NeedsAttention
+        );
+        assert!(state.lanes["lane-a"].failure_paused);
+
+        // Advance time past deadline and call expire
+        engine.expire(&mut state, time(11));
+        assert_eq!(state.requests[&request_id].status, RequestStatus::Expired);
+        assert!(!state.lanes["lane-a"].failure_paused);
+        assert_eq!(state.lanes["lane-a"].blocked_reason, None);
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|event| event.kind == "lane_unpaused" && event.lane_id == "lane-a")
+        );
     }
 }

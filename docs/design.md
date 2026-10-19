@@ -191,7 +191,7 @@ dispatching / running -> unknown -> running | succeeded | failed | superseded | 
 
 phase 是 run 的独立字段；running/succeeded 等不是业务阶段的替代物。succeeded 要求成功 receipt 已持久化；failed 是已确认执行失败。unknown 是交付或外部状态不确定，不等同于失败，可由可信观察修正。未能找到运行实例并不自动等于它从未执行。
 
-替代执行确定失败后，原请求不跟着成功；默认暂停本 lane 的自动尝试，相关请求进入 needs_attention，保留它们各自的原始目标。已确认停止且没有环境不确定性时释放执行 permit，但 lane 保留 failure_paused 标记；显式 retry 核对权限与目标后才能恢复，不由新请求到达自动清除。显式 retry 再选择一个能覆盖这些请求的目标，不自动降级上线旧版本。
+替代执行确定失败后，原请求不跟着成功；默认暂停本 lane 的自动尝试，相关请求进入 needs_attention，保留它们各自的原始目标。已确认停止且没有环境不确定性时释放执行 permit，但 lane 保留 failure_paused 标记；显式 retry 核对权限与目标后恢复，或当该 lane 上的所有 needs_attention 失败请求均已撤回/过期时自动解除，亦可由管理员调用 unpause 显式解除暂停；不由新请求到达自动清除。显式 retry 再选择一个能覆盖这些请求的目标，不自动降级上线旧版本。
 
 自动重试默认 0 次，管理员最多可配置 2 次；仅用于已证实没有环境写入的 transient 错误。人工 retry 与自动计数分开，默认每个请求允许 3 次显式 retry，须有 retry 权限且未过截止时间；恢复前仍需核对实际环境。混合批次的自动重试受所有 waiters 最小剩余额度约束。替代转移不重置计数，superseded 也不消耗失败重试额度；额度耗尽由管理员显式追加并审计。unknown、部署失败和验收失败不自动重放。
 
@@ -224,6 +224,7 @@ SQLite 事务保证本地状态原子性，不能包住 GitHub/SSH/K8s 的副作
 | POST /v1/runs/{id}/phase-grants | 执行器专用；与取消事务竞争，准入 deploying 等不可抢占阶段 |
 | POST /v1/executor-events | 执行器专用；验证身份与 fencing；M1 仅 ScriptedExecutor |
 | POST /v1/lanes/{id}/resolve-unknown | 管理员提供证据后恢复，不接受无条件解锁 |
+| POST /v1/lanes/{id}/unpause | 管理员显式清除 failure_paused 标记，保留其它 blocked_reason |
 | GET /live、GET /ready | 存活、数据库及调度器准备状态 |
 
 请求示例（版本仅为格式示例，不对应真实仓库提交）：
@@ -244,7 +245,7 @@ repository/profile/环境由 lane 配置派生，客户端不能替换。JSON �
 
 统一错误包含 code、message、retryable、request_id（若已创建）。主要错误：idempotency_conflict、target_not_allowed、lineage_unproven、forbidden、lane_blocked、not_retryable、deadline_elapsed。提交时遇到当前 lane 被阻塞仍可持久接纳请求并回显 blocked_reason；非法目标/无权限不创建请求。默认请求正文上限 16 KiB、reason 上限 2 KiB、每 lane 非终态请求上限 1000；幂等重试优先查已有请求，新增超限返回 429 和 Retry-After，不创建丢失归属的半请求。
 
-CLI 通过服务端 API 提交和查询：submit、wait、inspect/list request/run/lane、logs run/request、events、system、health、withdraw、retry、priority、resolve-unknown、drain/resume；serve 用于启动服务。请求日志绑定所选 run，换 run 时重置游标，不合并不同执行的日志；原有 logs RUN_ID 调用仍兼容。完整用法见 [Agent 指南](agents.md)。M1 wait 使用有界轮询与退避，事件接口用于审计；不额外建设 SSE/WebSocket/回调通知系统。wait satisfied 返回 0；needs_attention/expired/withdrawn/客户端超时分别给不同退出码（2/3/4/124）。
+CLI 通过服务端 API 提交和查询：submit、wait、inspect/list request/run/lane、logs run/request、events、system、health、withdraw、retry、priority、resolve-unknown、drain/resume、unpause；serve 用于启动服务。请求日志绑定所选 run，换 run 时重置游标，不合并不同执行的日志；原有 logs RUN_ID 调用仍兼容。完整用法见 [Agent 指南](agents.md)。M1 wait 使用有界轮询与退避，事件接口用于审计；不额外建设 SSE/WebSocket/回调通知系统。wait satisfied 返回 0；needs_attention/expired/withdrawn/客户端超时分别给不同退出码（2/3/4/124）。
 
 ### 7.9 Rust 模块与执行器边界
 

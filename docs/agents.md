@@ -194,6 +194,7 @@ shipbraid --version
 | `withdraw` / `retry` / `priority` | 管理请求 | lane 权限且为请求本人、冻结协作者或 admin；urgent 规则另见[权限说明](#协作权限与状态解释) |
 | `drain` / `resume` | 暂停或恢复新执行派发 | admin |
 | `resolve-unknown` | 依据独立执行器证据核对 unknown | admin 及对应 lane 权限 |
+| `unpause` | 显式清除 lane 的 failure_paused 标记 | admin 及对应 lane 权限 |
 | `health` | 检查 `/ready` | 无需 token |
 
 `system` 中主体的能力不代表可操作所有请求；服务端对每次写操作重新检查 lane、主体和请求状态。
@@ -304,10 +305,13 @@ shipbraid drain
 shipbraid resume
 shipbraid resolve-unknown --lane <LANE_ID> \
   --action <confirm-stopped|adopt-running> --evidence <REFERENCE> --reason <TEXT>
+shipbraid unpause <LANE_ID>
 shipbraid health
 ```
 
-`withdraw` 只撤回这个请求，不直接停止其他请求共享的 run。`retry` 使用原目标、参数和截止时间，不能用来换版本或绕过 unknown 所有权核对。`priority` 的原因默认为 `CLI priority update`，服务端原因上限为 2 KiB；提升为 urgent 需要 urgent/admin。`drain` 持久暂停新派发并继续观察活动 run；它不取消 run，也不等待执行排空。`resume` 显式恢复派发，两者均需 admin。`resolve-unknown` 要求 admin、lane 权限和执行器独立观察证据；`--action` 的连字符值会转换成 API 的下划线形式。未证实旧执行停止时不得释放 lane 所有权。`health` 无需 token，只检查 `/ready`，不代表任何请求已满足。
+`withdraw` 只撤回这个请求，不直接停止其他请求共享的 run。`retry` 使用原目标、参数和截止时间，不能用来换版本或绕过 unknown 所有权核对。`priority` 的原因默认为 `CLI priority update`，服务端原因上限为 2 KiB；提升为 urgent 需要 urgent/admin。`drain` 持久暂停新派发并继续观察活动 run；它不取消 run，也不等待执行排空。`resume` 显式恢复派发，两者均需 admin。`resolve-unknown` 要求 admin、lane 权限和执行器独立观察证据；`--action` 的连字符值会转换成 API 的下划线形式。未证实旧执行停止时不得释放 lane 所有权。`unpause` 显式清除指定 lane 的 `failure_paused` 标记并清理因失败导致的阻塞原因（需 admin 及对应 lane 权限）；它不会自动重试该 lane 上残留的 `needs_attention` 请求，残留的失败请求仍需显式 `retry` 或 `withdraw`。
+
+`health` 无需 token，只检查 `/ready`，不代表任何请求已满足。
 
 ### 机器错误与退出码
 
