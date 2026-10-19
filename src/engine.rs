@@ -1,4 +1,7 @@
-use std::{cmp::Reverse, collections::BTreeMap};
+use std::{
+    cmp::Reverse,
+    collections::{BTreeMap, BTreeSet},
+};
 
 use chrono::{DateTime, Duration, Utc};
 use sha2::{Digest, Sha256};
@@ -1335,7 +1338,66 @@ impl Engine {
             "request_withdrawn",
             "request withdrawn; other waiters and run ownership are unchanged",
         );
+        self.unpause_lane_if_no_needs_attention(state, &request.lane_id, now);
         Ok(())
+    }
+
+    pub fn unpause_lane(
+        &self,
+        state: &mut State,
+        lane_id: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        let lane = state
+            .lanes
+            .get_mut(lane_id)
+            .ok_or_else(|| DomainError::LaneNotFound(lane_id.to_owned()))?;
+        lane.failure_paused = false;
+        if lane.blocked_reason.as_deref() == Some(FAILURE_BLOCK) {
+            lane.blocked_reason = None;
+        }
+        emit(
+            state,
+            lane_id,
+            None,
+            None,
+            now,
+            "lane_unpaused",
+            "lane failure pause cleared by operator",
+        );
+        Ok(())
+    }
+
+    fn unpause_lane_if_no_needs_attention(
+        &self,
+        state: &mut State,
+        lane_id: &str,
+        now: DateTime<Utc>,
+    ) {
+        if let Some(lane) = state.lanes.get_mut(lane_id)
+            && lane.failure_paused
+            && lane.active_run_id.is_none()
+        {
+            let has_needs_attention = state
+                .requests
+                .values()
+                .any(|req| req.lane_id == lane_id && req.status == RequestStatus::NeedsAttention);
+            if !has_needs_attention {
+                lane.failure_paused = false;
+                if lane.blocked_reason.as_deref() == Some(FAILURE_BLOCK) {
+                    lane.blocked_reason = None;
+                }
+                emit(
+                    state,
+                    lane_id,
+                    None,
+                    None,
+                    now,
+                    "lane_unpaused",
+                    "lane failure pause cleared; no requests need attention",
+                );
+            }
+        }
     }
 
     pub fn retry(
@@ -1392,12 +1454,14 @@ impl Engine {
             })
             .map(|request| request.id)
             .collect::<Vec<_>>();
+        let mut affected_lanes = BTreeSet::new();
         for request_id in expired {
             if let Some(request) = state.requests.get_mut(&request_id) {
                 request.status = RequestStatus::Expired;
                 request.current_run_id = None;
                 request.waiting_reason = None;
                 let lane_id = request.lane_id.clone();
+                affected_lanes.insert(lane_id.clone());
                 emit(
                     state,
                     &lane_id,
@@ -1408,6 +1472,9 @@ impl Engine {
                     "request deadline elapsed before verified satisfaction",
                 );
             }
+        }
+        for lane_id in affected_lanes {
+            self.unpause_lane_if_no_needs_attention(state, &lane_id, now);
         }
     }
 
@@ -2539,7 +2606,7 @@ mod tests {
     use super::{Engine, EngineConfig};
     use crate::{
         domain::{
-            CommandDelivery, CoverageMode, DeploymentReceipt, ExecutorResult, Lane,
+            CommandDelivery, CoverageMode, DeploymentReceipt, DomainError, ExecutorResult, Lane,
             LineageRelation, Phase, Priority, ReceiptResult, ReconcileIds, ReconcileOutcome,
             RequestStatus, RunState, State, SubmitInput, Target, TargetAuthorization,
             UnknownResolution,
@@ -4496,5 +4563,229 @@ mod tests {
         assert_eq!(state.requests[&request_id].status, RequestStatus::Waiting);
         assert_eq!(state.requests[&request_id].target.revision, revision);
         assert!(!state.lanes["lane-a"].failure_paused);
+    }
+
+    #[test]
+    fn withdrawing_failed_request_unpauses_lane_when_no_other_needs_attention() {
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut state = setup(&engine, "lane-a");
+        let revision = "a".repeat(40);
+        let request_id = submit(
+            &mut state,
+            &engine,
+            1,
+            "lane-a",
+            &revision,
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            &CoverageContext::default(),
+        );
+        let run_id = dispatched_run(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(2),
+                    ReconcileIds {
+                        run_id: ids(100),
+                        command_id: ids(101),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+        );
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Started {
+                    executor_ref: "exec".to_owned(),
+                },
+                time(3),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Failed {
+                    message: "deploy failed".to_owned(),
+                    environment_known_unchanged: true,
+                },
+                time(4),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.requests[&request_id].status,
+            RequestStatus::NeedsAttention
+        );
+        assert!(state.lanes["lane-a"].failure_paused);
+        assert_eq!(
+            state.lanes["lane-a"].blocked_reason.as_deref(),
+            Some("failure_paused")
+        );
+
+        engine
+            .withdraw(&mut state, request_id, "caller-1", time(5))
+            .unwrap();
+        assert_eq!(state.requests[&request_id].status, RequestStatus::Withdrawn);
+        assert!(!state.lanes["lane-a"].failure_paused);
+        assert_eq!(state.lanes["lane-a"].blocked_reason, None);
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|event| event.kind == "lane_unpaused" && event.lane_id == "lane-a")
+        );
+    }
+
+    #[test]
+    fn withdrawing_one_does_not_unpause_when_other_needs_attention_remain() {
+        let engine = Engine::new(EngineConfig {
+            coalesce_window: Duration::zero(),
+            ..EngineConfig::default()
+        });
+        let mut state = setup(&engine, "lane-a");
+        let revision = "a".repeat(40);
+        let first_id = submit(
+            &mut state,
+            &engine,
+            1,
+            "lane-a",
+            &revision,
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            1,
+            &CoverageContext::default(),
+        );
+        let second_id = submit(
+            &mut state,
+            &engine,
+            2,
+            "lane-a",
+            &revision,
+            &["app"],
+            CoverageMode::Exact,
+            Priority::Normal,
+            2,
+            &CoverageContext::default(),
+        );
+        let run_id = dispatched_run(
+            engine
+                .reconcile(
+                    &mut state,
+                    "lane-a",
+                    time(2),
+                    ReconcileIds {
+                        run_id: ids(100),
+                        command_id: ids(101),
+                    },
+                    &CoverageContext::default(),
+                )
+                .unwrap(),
+        );
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Started {
+                    executor_ref: "exec".to_owned(),
+                },
+                time(3),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        engine
+            .executor_result(
+                &mut state,
+                run_id,
+                1,
+                "exec",
+                ExecutorResult::Failed {
+                    message: "deploy failed".to_owned(),
+                    environment_known_unchanged: true,
+                },
+                time(4),
+                &CoverageContext::default(),
+            )
+            .unwrap();
+        assert_eq!(
+            state.requests[&first_id].status,
+            RequestStatus::NeedsAttention
+        );
+        assert_eq!(
+            state.requests[&second_id].status,
+            RequestStatus::NeedsAttention
+        );
+        assert!(state.lanes["lane-a"].failure_paused);
+
+        // Withdraw first request: second request is still in NeedsAttention
+        engine
+            .withdraw(&mut state, first_id, "caller-1", time(5))
+            .unwrap();
+        assert_eq!(state.requests[&first_id].status, RequestStatus::Withdrawn);
+        assert!(state.lanes["lane-a"].failure_paused);
+        assert_eq!(
+            state.lanes["lane-a"].blocked_reason.as_deref(),
+            Some("failure_paused")
+        );
+        assert!(
+            !state
+                .events
+                .iter()
+                .any(|event| event.kind == "lane_unpaused")
+        );
+
+        // Withdraw second request: no requests in NeedsAttention remain
+        engine
+            .withdraw(&mut state, second_id, "caller-2", time(6))
+            .unwrap();
+        assert_eq!(state.requests[&second_id].status, RequestStatus::Withdrawn);
+        assert!(!state.lanes["lane-a"].failure_paused);
+        assert_eq!(state.lanes["lane-a"].blocked_reason, None);
+        assert!(
+            state
+                .events
+                .iter()
+                .any(|event| event.kind == "lane_unpaused" && event.lane_id == "lane-a")
+        );
+    }
+
+    #[test]
+    fn explicit_unpause_lane_clears_failure_paused_and_emits_event() {
+        let engine = Engine::new(EngineConfig::default());
+        let mut state = setup(&engine, "lane-a");
+        state.lanes.get_mut("lane-a").unwrap().failure_paused = true;
+        state.lanes.get_mut("lane-a").unwrap().blocked_reason = Some("failure_paused".to_owned());
+
+        engine.unpause_lane(&mut state, "lane-a", time(5)).unwrap();
+        assert!(!state.lanes["lane-a"].failure_paused);
+        assert_eq!(state.lanes["lane-a"].blocked_reason, None);
+        let event = state
+            .events
+            .iter()
+            .find(|event| event.kind == "lane_unpaused" && event.lane_id == "lane-a")
+            .unwrap();
+        assert_eq!(event.message, "lane failure pause cleared by operator");
+
+        // Unpausing nonexistent lane returns error
+        assert!(matches!(
+            engine.unpause_lane(&mut state, "nonexistent", time(6)),
+            Err(DomainError::LaneNotFound(name)) if name == "nonexistent"
+        ));
     }
 }

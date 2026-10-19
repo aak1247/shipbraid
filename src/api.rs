@@ -429,6 +429,7 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/artifacts", get(list_artifacts))
         .route("/lanes", get(list_lanes))
         .route("/lanes/{lane_id}", get(get_lane))
+        .route("/lanes/{lane_id}/unpause", post(unpause_lane))
         .route("/lanes/{lane_id}/resolve-unknown", post(resolve_unknown))
         .route("/requests", get(list_requests).post(create_request))
         .route("/requests/{request_id}", get(get_request))
@@ -536,7 +537,7 @@ async fn system(
         api_version: "1",
         tenant_id: LOCAL_TENANT_ID,
         principal: actor.id.clone(),
-        capabilities: json!({"submit":true,"withdraw":true,"retry":true,"raise_priority":actor.urgent || actor.admin,"admin":actor.admin}),
+        capabilities: json!({"submit":true,"withdraw":true,"retry":true,"raise_priority":actor.urgent || actor.admin,"admin":actor.admin,"unpause":actor.admin}),
         executor: state.service.executor_mix(),
         draining: snapshot.draining,
         version: env!("CARGO_PKG_VERSION"),
@@ -1196,6 +1197,30 @@ async fn executor_event(
         .get(&body.run_id)
         .ok_or_else(|| ApiError::missing("Run not found."))?;
     Ok(Json(run_view(run, &snapshot)))
+}
+
+async fn unpause_lane(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(lane_id): Path<String>,
+) -> Result<Json<Value>, ApiError> {
+    require_admin(&actor)?;
+    let snapshot = state.service.snapshot().await;
+    let lane = snapshot
+        .lanes
+        .get(&lane_id)
+        .ok_or_else(|| ApiError::missing("Lane not found."))?;
+    require_lane(&actor, lane)?;
+    state
+        .service
+        .unpause_lane(&lane_id, Some(&actor.id))
+        .await?;
+    let snapshot = state.service.snapshot().await;
+    let lane = snapshot
+        .lanes
+        .get(&lane_id)
+        .ok_or_else(|| ApiError::missing("Lane not found."))?;
+    Ok(Json(lane_view(lane, state.service.executor_kind(&lane.id))))
 }
 
 async fn resolve_unknown(
@@ -2221,6 +2246,7 @@ mod tests {
         assert_eq!(system["api_version"], "1");
         assert_eq!(system["principal"], "bob");
         assert_eq!(system["capabilities"]["raise_priority"], false);
+        assert_eq!(system["capabilities"]["unpause"], false);
         let (_, lane) = f.call("bob", "GET", "/v1/lanes/lane-one", None).await;
         assert_eq!(lane["repository_id"], "repo");
         assert_eq!(lane["components"], json!(["app"]));
@@ -2568,5 +2594,110 @@ mod tests {
             "/artifacts/project_a/binary.bin"
         );
         assert_eq!(list_json["artifacts"][0]["size_bytes"], 27);
+    }
+
+    #[tokio::test]
+    async fn unpause_lane_requires_admin_and_clears_failure_paused() {
+        let f = team_fixture().await;
+
+        // Verify capabilities for admin vs non-admin
+        let (_, admin_system) = f.call("admin", "GET", "/v1/system", None).await;
+        assert_eq!(admin_system["capabilities"]["unpause"], true);
+        let (_, bob_system) = f.call("bob", "GET", "/v1/system", None).await;
+        assert_eq!(bob_system["capabilities"]["unpause"], false);
+
+        // Non-admin cannot call unpause
+        assert_eq!(
+            f.call("bob", "POST", "/v1/lanes/lane-one/unpause", None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+
+        // Admin calling nonexistent lane returns 404
+        assert_eq!(
+            f.call("admin", "POST", "/v1/lanes/nonexistent/unpause", None)
+                .await
+                .0,
+            StatusCode::NOT_FOUND
+        );
+
+        // Put lane-one into failure_paused
+        f.service
+            .transact(Some("lane-one"), |_, state, _| {
+                let lane = state.lanes.get_mut("lane-one").unwrap();
+                lane.failure_paused = true;
+                lane.blocked_reason = Some("failure_paused".to_owned());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(f.service.snapshot().await.lanes["lane-one"].failure_paused);
+
+        // Admin successfully unpauses
+        let (status, lane) = f
+            .call("admin", "POST", "/v1/lanes/lane-one/unpause", None)
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(lane["failure_paused"], false);
+        assert_eq!(lane["blocked_reason"], Value::Null);
+        let snapshot = f.service.snapshot().await;
+        assert!(!snapshot.lanes["lane-one"].failure_paused);
+        assert_eq!(snapshot.lanes["lane-one"].blocked_reason, None);
+        let unpaused_event = snapshot
+            .events
+            .iter()
+            .find(|e| e.kind == "lane_unpaused" && e.lane_id == "lane-one")
+            .unwrap();
+        assert_eq!(unpaused_event.actor.as_deref(), Some("admin"));
+    }
+
+    #[tokio::test]
+    async fn withdrawing_failed_request_via_api_unpauses_lane() {
+        let f = team_fixture().await;
+        let mut body = f.body();
+        body["lane_id"] = json!("lane-one");
+        let (status, request) = f.submit("alice", "fail-and-withdraw", body).await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+        let request_id = parse_uuid(request["id"].as_str().unwrap()).unwrap();
+
+        // Simulate run failure settling into NeedsAttention and failure_paused
+        f.service
+            .transact(Some("lane-one"), |_, state, _| {
+                let req = state.requests.get_mut(&request_id).unwrap();
+                req.status = RequestStatus::NeedsAttention;
+                req.waiting_reason = Some("run_failed".to_owned());
+                let lane = state.lanes.get_mut("lane-one").unwrap();
+                lane.failure_paused = true;
+                lane.blocked_reason = Some("failure_paused".to_owned());
+                lane.active_run_id = None;
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(f.service.snapshot().await.lanes["lane-one"].failure_paused);
+
+        // Alice withdraws the failed request
+        let (status, view) = f
+            .call(
+                "alice",
+                "POST",
+                &format!("/v1/requests/{request_id}/withdraw"),
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(view["status"], "withdrawn");
+
+        // Lane is automatically unpaused
+        let snapshot = f.service.snapshot().await;
+        assert!(!snapshot.lanes["lane-one"].failure_paused);
+        assert_eq!(snapshot.lanes["lane-one"].blocked_reason, None);
+        assert!(
+            snapshot
+                .events
+                .iter()
+                .any(|e| e.kind == "lane_unpaused" && e.lane_id == "lane-one")
+        );
     }
 }

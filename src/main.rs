@@ -155,6 +155,14 @@ enum Command {
     Drain,
     /// Resume dispatch after an explicit drain.
     Resume,
+    /// Clear a failure pause on a lane after operator intervention.
+    Unpause {
+        /// Lane identifier to unpause.
+        #[arg(required_unless_present = "lane")]
+        lane_id: Option<String>,
+        #[arg(long, conflicts_with = "lane_id")]
+        lane: Option<String>,
+    },
     /// Resolve unknown only with independently observed executor evidence.
     ResolveUnknown {
         #[arg(long)]
@@ -919,6 +927,11 @@ async fn run(cli: Cli) -> Result<u8> {
         }
         Command::Drain => api.post("/v1/drain", json!({})).await?,
         Command::Resume => api.post("/v1/resume", json!({})).await?,
+        Command::Unpause { lane_id, lane } => {
+            let lane = lane_id.or(lane).expect("clap enforces one lane identifier");
+            api.post(&format!("/v1/lanes/{}/unpause", segment(&lane)?), json!({}))
+                .await?
+        }
         Command::ResolveUnknown {
             lane,
             action,
@@ -1147,5 +1160,58 @@ mod tests {
         assert!(Api::new("http://192.0.2.1:8787", None).is_err());
         assert!(Api::new("http://127.0.0.1:8787", None).is_ok());
         assert!(Api::new("https://example.com", None).is_ok());
+    }
+    #[test]
+    fn unpause_accepts_positional_or_flag_lane_and_token_options() {
+        // Positional lane_id
+        let cli = Cli::try_parse_from(["shipbraid", "unpause", "prod-lane"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Unpause {
+                lane_id: Some(ref id),
+                lane: None
+            } if id == "prod-lane"
+        ));
+
+        // --lane flag
+        let cli = Cli::try_parse_from(["shipbraid", "unpause", "--lane", "prod-lane"]).unwrap();
+        assert!(matches!(
+            cli.command,
+            Command::Unpause {
+                lane_id: None,
+                lane: Some(ref id)
+            } if id == "prod-lane"
+        ));
+
+        // Missing lane is rejected
+        assert!(Cli::try_parse_from(["shipbraid", "unpause"]).is_err());
+
+        // Conflicting positional and flag is rejected
+        assert!(
+            Cli::try_parse_from(["shipbraid", "unpause", "prod-lane", "--lane", "other-lane"])
+                .is_err()
+        );
+
+        // Global token options work before and after subcommand
+        let cli = Cli::try_parse_from(["shipbraid", "--token", "tok-123", "unpause", "prod-lane"])
+            .unwrap();
+        assert_eq!(cli.token.as_deref(), Some("tok-123"));
+
+        let cli = Cli::try_parse_from(["shipbraid", "unpause", "prod-lane", "--token", "tok-456"])
+            .unwrap();
+        assert_eq!(cli.token.as_deref(), Some("tok-456"));
+
+        let cli = Cli::try_parse_from([
+            "shipbraid",
+            "unpause",
+            "prod-lane",
+            "--token-file",
+            "/tmp/token.txt",
+        ])
+        .unwrap();
+        assert_eq!(
+            cli.token_file.as_deref(),
+            Some(std::path::Path::new("/tmp/token.txt"))
+        );
     }
 }

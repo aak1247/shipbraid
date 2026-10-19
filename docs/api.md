@@ -24,6 +24,7 @@ Lane/run/event lists return `{ "items": [...] }`. Request lists return `{ "items
 | POST | `/v1/resume` | Admin: explicitly resume dispatch |
 | POST | `/v1/runs/{id}/phase-grants` | Executor: fenced stage transition |
 | POST | `/v1/executor-events` | Executor: report a fenced execution event |
+| POST | `/v1/lanes/{id}/unpause` | Admin: clear lane failure pause |
 | POST | `/v1/lanes/{id}/resolve-unknown` | Admin: reconcile independently observed evidence |
 
 Cursor sequences belong to a lane. Events require `lane_id`, including the first page; logs belong to a single run. When a request follows a successor, start that run's log cursor at zero.
@@ -40,7 +41,7 @@ Without any associated run, request logs return `{request_id, run_id:null, items
 
 ## Agent discovery, context, and collaboration
 
-`GET /v1/system` adds `api_version: "1"`, `tenant_id: "local"`, authenticated `principal`, and `capabilities` (submit/withdraw/retry/raise_priority/admin). These are principal capabilities, not permission to mutate every request. Lane views include `tenant_id`, `repository_id`, allowed `components` and `coverage_modes`; filesystem paths and credentials are omitted.
+`GET /v1/system` adds `api_version: "1"`, `tenant_id: "local"`, authenticated `principal`, and `capabilities` (submit/withdraw/retry/raise_priority/admin/unpause). These are principal capabilities, not permission to mutate every request. Lane views include `tenant_id`, `repository_id`, allowed `components` and `coverage_modes`; filesystem paths and credentials are omitted.
 
 Submission optionally accepts the top-level fields `task_id`, `session_id` (nonempty, at most 256 bytes, no control characters), and `collaborators` (at most 16 configured, lane-authorized, non-executor token ids). Only nonempty `task_id` and sorted/deduplicated collaborators participate in the request hash; absent, null, or empty optional values and session-only submissions preserve the old hash. Session is creation trace only and never changes on replay. Collaborators are immutable in this version. See [Agent guide](agents.md#提交并等待) for the matching CLI flags; the CLI has no generic `--context` option.
 

@@ -934,6 +934,27 @@ impl Service {
         .await
     }
 
+    pub async fn unpause_lane(
+        &self,
+        lane_id: &str,
+        actor: Option<&str>,
+    ) -> Result<(), ServiceError> {
+        let _executor = self.executor_gate.lock().await;
+        let id = lane_id.to_owned();
+        let actor = actor.map(str::to_owned);
+        self.transact(Some(lane_id), move |engine, state, _| {
+            let start = state.events.len();
+            engine.unpause_lane(state, &id, Utc::now())?;
+            if let Some(actor) = &actor {
+                for event in &mut state.events[start..] {
+                    event.actor = Some(actor.clone());
+                }
+            }
+            Ok(())
+        })
+        .await
+    }
+
     pub async fn scheduler_tick(&self) -> Result<(), ServiceError> {
         if !self.ready.load(Ordering::Acquire) {
             return Err(ServiceError::NotReady);
@@ -946,7 +967,7 @@ impl Service {
         Ok(())
     }
 
-    async fn transact<T>(
+    pub(crate) async fn transact<T>(
         &self,
         lane_id: Option<&str>,
         apply: impl FnOnce(&Engine, &mut State, &CoverageContext) -> Result<T, ServiceError>,
@@ -3322,5 +3343,34 @@ print(json.dumps(reply))
             service.snapshot().await.lanes["test-lane"].active_run_id,
             Some(run_id)
         );
+    }
+
+    #[tokio::test]
+    async fn unpause_lane_clears_failure_paused_and_sets_actor() {
+        let (_temp, service) = test_service().await;
+        service
+            .transact(Some("test-lane"), |_, state, _| {
+                let lane = state.lanes.get_mut("test-lane").unwrap();
+                lane.failure_paused = true;
+                lane.blocked_reason = Some("failure_paused".to_owned());
+                Ok(())
+            })
+            .await
+            .unwrap();
+        assert!(service.snapshot().await.lanes["test-lane"].failure_paused);
+
+        service
+            .unpause_lane("test-lane", Some("operator-alice"))
+            .await
+            .unwrap();
+        let snapshot = service.snapshot().await;
+        assert!(!snapshot.lanes["test-lane"].failure_paused);
+        assert_eq!(snapshot.lanes["test-lane"].blocked_reason, None);
+        let event = snapshot
+            .events
+            .iter()
+            .find(|e| e.kind == "lane_unpaused" && e.lane_id == "test-lane")
+            .unwrap();
+        assert_eq!(event.actor.as_deref(), Some("operator-alice"));
     }
 }
