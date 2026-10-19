@@ -419,12 +419,14 @@ struct SystemView {
 
 pub fn router(service: Arc<Service>) -> Router {
     let dashboard_dir = service.dashboard_dir().map(std::path::Path::to_path_buf);
+    let artifacts_dir = service.artifacts_dir().map(std::path::Path::to_path_buf);
     let state = ApiState {
         tokens: service.tokens().to_vec(),
         service,
     };
     let protected = Router::new()
         .route("/system", get(system))
+        .route("/artifacts", get(list_artifacts))
         .route("/lanes", get(list_lanes))
         .route("/lanes/{lane_id}", get(get_lane))
         .route("/lanes/{lane_id}/resolve-unknown", post(resolve_unknown))
@@ -453,6 +455,14 @@ pub fn router(service: Arc<Service>) -> Router {
         .nest("/v1", protected)
         .fallback(api_not_found)
         .with_state(state);
+
+    if let Some(path) = artifacts_dir {
+        router = router.nest_service(
+            "/artifacts",
+            tower_http::services::ServeDir::new(path).append_index_html_on_directories(true),
+        );
+    }
+
     if let Some(path) = dashboard_dir {
         router = router.fallback_service(
             tower_http::services::ServeDir::new(path).append_index_html_on_directories(true),
@@ -1236,6 +1246,76 @@ async fn resume(
     parse_body(body)?;
     state.service.set_draining(false).await?;
     Ok(Json(json!({"draining":false})))
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactItem {
+    path: String,
+    filename: String,
+    size_bytes: u64,
+    download_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    modified_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Serialize)]
+struct ArtifactsResponse {
+    artifacts: Vec<ArtifactItem>,
+}
+
+async fn list_artifacts(
+    State(state): State<ApiState>,
+) -> Result<Json<ArtifactsResponse>, ApiError> {
+    let Some(artifacts_dir) = state.service.artifacts_dir() else {
+        return Ok(Json(ArtifactsResponse { artifacts: vec![] }));
+    };
+    if !artifacts_dir.is_dir() {
+        return Ok(Json(ArtifactsResponse { artifacts: vec![] }));
+    }
+
+    let mut artifacts = Vec::new();
+    collect_artifacts(artifacts_dir, artifacts_dir, &mut artifacts);
+    artifacts.sort_by(|a, b| a.path.cmp(&b.path));
+
+    Ok(Json(ArtifactsResponse { artifacts }))
+}
+
+fn collect_artifacts(
+    root: &std::path::Path,
+    current: &std::path::Path,
+    out: &mut Vec<ArtifactItem>,
+) {
+    let Ok(entries) = std::fs::read_dir(current) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let file_name = entry.file_name().to_string_lossy().to_string();
+        if file_name.starts_with('.') {
+            continue;
+        }
+        if path.is_dir() {
+            collect_artifacts(root, &path, out);
+        } else if path.is_file() {
+            let size_bytes = entry.metadata().map(|m| m.len()).unwrap_or(0);
+            let modified_at = entry
+                .metadata()
+                .ok()
+                .and_then(|m| m.modified().ok())
+                .map(DateTime::<Utc>::from);
+            if let Ok(rel) = path.strip_prefix(root) {
+                let rel_str = rel.to_string_lossy().replace('\\', "/");
+                let download_url = format!("/artifacts/{}", rel_str);
+                out.push(ArtifactItem {
+                    path: rel_str,
+                    filename: file_name,
+                    size_bytes,
+                    download_url,
+                    modified_at,
+                });
+            }
+        }
+    }
 }
 
 async fn api_not_found() -> ApiError {
@@ -2403,5 +2483,90 @@ mod tests {
             lane["request_parameters"]["database_backup"]["required"],
             true
         );
+    }
+
+    #[tokio::test]
+    async fn artifacts_distribution_serves_files_and_lists_metadata() {
+        let temp = tempfile::tempdir().unwrap();
+        let artifacts_path = temp.path().join("dist_artifacts");
+        std::fs::create_dir_all(artifacts_path.join("project_a")).unwrap();
+        std::fs::write(
+            artifacts_path.join("project_a/binary.bin"),
+            b"hello-artifact-distribution",
+        )
+        .unwrap();
+
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let token_env = format!("TEST_TOKEN_{}", Uuid::new_v4().simple());
+        let token = "a".repeat(40);
+        unsafe { std::env::set_var(&token_env, &token) };
+
+        let config = Config {
+            database_path: temp.path().join("state.db"),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["lane-one".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "lane-one".into(),
+                project: "project_a".into(),
+                environment: "test".into(),
+                repository_id: "repo".into(),
+                repository_path: PathBuf::from(&mirror),
+                release_ref: "refs/heads/release".into(),
+                profile_digest: "synthetic-profile".into(),
+                components: vec!["app".into()],
+                allow_descendant: true,
+                allow_preemption: true,
+                failure_observe: None,
+                request_parameters: Default::default(),
+                enabled: true,
+                executor: LaneExecutorConfig::Scripted,
+            }],
+            artifacts_dir: Some(artifacts_path),
+            ..Config::default()
+        };
+        let service = Service::open(config).await.unwrap();
+        unsafe { std::env::remove_var(&token_env) };
+        let app = router(service);
+
+        // 1. Direct download from /artifacts without auth
+        let resp = send(
+            app.clone(),
+            "GET",
+            "/artifacts/project_a/binary.bin",
+            None,
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(&bytes[..], b"hello-artifact-distribution");
+
+        // 2. Listing via /v1/artifacts with auth
+        let (status, list_json) = {
+            let resp = send(app.clone(), "GET", "/v1/artifacts", Some(&token), None).await;
+            response_json(resp).await
+        };
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(list_json["artifacts"].as_array().unwrap().len(), 1);
+        assert_eq!(list_json["artifacts"][0]["path"], "project_a/binary.bin");
+        assert_eq!(
+            list_json["artifacts"][0]["download_url"],
+            "/artifacts/project_a/binary.bin"
+        );
+        assert_eq!(list_json["artifacts"][0]["size_bytes"], 27);
     }
 }

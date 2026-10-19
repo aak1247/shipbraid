@@ -90,6 +90,29 @@ where
         ));
     }
 
+    if let Some(artifacts_dir) = &config.artifacts_dir {
+        let (status, message, suggestion) = if artifacts_dir.is_dir() {
+            (
+                CheckStatus::Pass,
+                "Configured artifacts directory is present.",
+                "No action is needed.",
+            )
+        } else {
+            (
+                CheckStatus::Fail,
+                "Configured artifacts directory does not exist or is not a directory.",
+                "Create a readable artifacts directory.",
+            )
+        };
+        checks.push(Check::new(
+            "config.artifacts_dir",
+            status,
+            "artifacts_dir",
+            message,
+            suggestion,
+        ));
+    }
+
     checks
 }
 

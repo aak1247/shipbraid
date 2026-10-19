@@ -331,6 +331,10 @@ impl Service {
         self.config.dashboard_dir.as_deref()
     }
 
+    pub fn artifacts_dir(&self) -> Option<&Path> {
+        self.config.artifacts_dir.as_deref()
+    }
+
     fn lane_executor(&self, lane_id: &str) -> Option<&LaneExecutorConfig> {
         self.lane_executors.get(lane_id)
     }
@@ -2580,6 +2584,7 @@ mod tests {
             cancel_timeout_seconds: 30,
             coalesce_ms: 0,
             dashboard_dir: None,
+            artifacts_dir: None,
         };
         let service = Service::open(config).await.unwrap();
         (temp, service)
@@ -2673,6 +2678,7 @@ print(json.dumps(reply))
             cancel_timeout_seconds: 30,
             coalesce_ms: 0,
             dashboard_dir: None,
+            artifacts_dir: None,
         };
         let service = Service::open(config.clone()).await.unwrap();
         (temp, config, service, marker)

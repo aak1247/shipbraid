@@ -23,6 +23,7 @@ pub struct Config {
     pub cancel_timeout_seconds: u64,
     pub coalesce_ms: u64,
     pub dashboard_dir: Option<PathBuf>,
+    pub artifacts_dir: Option<PathBuf>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -38,6 +39,7 @@ impl Default for Config {
             cancel_timeout_seconds: 60,
             coalesce_ms: 2000,
             dashboard_dir: None,
+            artifacts_dir: None,
         }
     }
 }
@@ -195,6 +197,11 @@ impl Config {
         {
             *dashboard_dir = base.join(&*dashboard_dir);
         }
+        if let Some(artifacts_dir) = &mut config.artifacts_dir
+            && artifacts_dir.is_relative()
+        {
+            *artifacts_dir = base.join(&*artifacts_dir);
+        }
         for lane in &mut config.lanes {
             if lane.repository_path.is_relative() {
                 lane.repository_path = base.join(&lane.repository_path);
@@ -251,6 +258,9 @@ impl Config {
                 if self.dashboard_dir.is_some() {
                     bail!("local mode does not allow a dashboard directory");
                 }
+                if self.artifacts_dir.is_some() {
+                    bail!("local mode does not allow an artifacts directory");
+                }
                 if self.lanes.is_empty() {
                     bail!("local mode requires at least one lane");
                 }
@@ -274,6 +284,13 @@ impl Config {
             .is_some_and(|path| !path.is_dir())
         {
             bail!("configured dashboard directory does not exist");
+        }
+        if self
+            .artifacts_dir
+            .as_ref()
+            .is_some_and(|path| path.exists() && !path.is_dir())
+        {
+            bail!("configured artifacts directory is not a directory");
         }
         let mut lane_ids = std::collections::HashSet::new();
         for lane in &self.lanes {
@@ -543,9 +560,13 @@ mod tests {
         });
         assert!(with_token.validate().is_err());
 
-        let mut with_dashboard = base;
+        let mut with_dashboard = base.clone();
         with_dashboard.dashboard_dir = Some(temp.path().to_path_buf());
         assert!(with_dashboard.validate().is_err());
+
+        let mut with_artifacts = base;
+        with_artifacts.artifacts_dir = Some(temp.path().to_path_buf());
+        assert!(with_artifacts.validate().is_err());
     }
 
     #[test]
