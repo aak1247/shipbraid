@@ -10,6 +10,29 @@ use sqlx::{
 };
 
 use crate::domain::{LOCAL_TENANT_ID, State};
+use crate::resources::{ManagedResource, ResourceEvent, ResourcePin, ResourcePinKind};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ResourceStoreError {
+    #[error("resource was not found")]
+    NotFound,
+    #[error("resource conflict: {0}")]
+    Conflict(String),
+    #[error("resource storage operation failed: {0}")]
+    Storage(#[source] anyhow::Error),
+}
+
+impl From<sqlx::Error> for ResourceStoreError {
+    fn from(error: sqlx::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
+
+impl From<serde_json::Error> for ResourceStoreError {
+    fn from(error: serde_json::Error) -> Self {
+        Self::Storage(error.into())
+    }
+}
 
 const WRITE_TIMEOUT: Duration = Duration::from_secs(3);
 // Opening a connection may include filesystem initialization under host load.
@@ -343,6 +366,231 @@ impl Store {
         tx.commit().await.context("commit state transaction")
     }
 
+    /// Insert or refresh one registered resource. Paths and overlaps are
+    /// checked again under the SQLite write lock so concurrent administrators
+    /// cannot account for the same bytes twice.
+    pub async fn register_resource(
+        &self,
+        mut resource: ManagedResource,
+        actor: &str,
+    ) -> Result<ManagedResource, ResourceStoreError> {
+        resource.pins.clear();
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let existing = sqlx::query_scalar::<_, String>(
+            "SELECT entity_json FROM managed_resources WHERE id = ?",
+        )
+        .bind(&resource.id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        if let Some(existing) = &existing {
+            let old: ManagedResource = serde_json::from_str(existing)?;
+            if old.root_id != resource.root_id || old.canonical_path != resource.canonical_path {
+                return Err(ResourceStoreError::Conflict(
+                    "a resource id cannot be moved to another root or path".into(),
+                ));
+            }
+        }
+        let managed_paths = sqlx::query(
+            "SELECT id, canonical_path FROM managed_resources WHERE root_id = ? ORDER BY id",
+        )
+        .bind(&resource.root_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        let new_path = Path::new(&resource.canonical_path);
+        for row in managed_paths {
+            let id: String = row.try_get("id")?;
+            let path: String = row.try_get("canonical_path")?;
+            if id != resource.id && crate::resources::paths_overlap(new_path, Path::new(&path)) {
+                return Err(ResourceStoreError::Conflict(format!(
+                    "resource path overlaps already registered resource {id}"
+                )));
+            }
+        }
+
+        let is_new = existing.is_none();
+        if let Some(existing) = existing {
+            let old: ManagedResource = serde_json::from_str(&existing)?;
+            resource.created_at = old.created_at;
+        }
+        let entity = serde_json::to_string(&resource)?;
+        let observed_bytes = i64::try_from(resource.observed_bytes).map_err(|_| {
+            ResourceStoreError::Conflict("observed_bytes exceeds SQLite's supported range".into())
+        })?;
+        let kind = resource_kind_name(resource.kind);
+        sqlx::query(
+            "INSERT INTO managed_resources (id, root_id, canonical_path, owner, project, kind, observed_bytes, last_used_at, recreatable, entity_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
+             ON CONFLICT(id) DO UPDATE SET owner=excluded.owner, project=excluded.project, kind=excluded.kind, observed_bytes=excluded.observed_bytes, last_used_at=excluded.last_used_at, recreatable=excluded.recreatable, entity_json=excluded.entity_json",
+        )
+        .bind(&resource.id)
+        .bind(&resource.root_id)
+        .bind(&resource.canonical_path)
+        .bind(&resource.owner)
+        .bind(&resource.project)
+        .bind(kind)
+        .bind(observed_bytes)
+        .bind(resource.last_used_at.to_rfc3339())
+        .bind(resource.recreatable)
+        .bind(entity)
+        .execute(&mut *tx)
+        .await?;
+        let detail = serde_json::to_string(&resource)?;
+        append_resource_event(
+            &mut tx,
+            &resource.id,
+            actor,
+            if is_new { "registered" } else { "refreshed" },
+            resource.updated_at,
+            &detail,
+        )
+        .await?;
+        tx.commit().await?;
+        self.get_resource(&resource.id)
+            .await
+            .map_err(ResourceStoreError::Storage)
+    }
+
+    pub async fn list_resources(&self) -> anyhow::Result<Vec<ManagedResource>> {
+        let rows = sqlx::query(
+            "SELECT entity_json FROM managed_resources ORDER BY root_id, last_used_at, id",
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        let mut resources = Vec::with_capacity(rows.len());
+        for row in rows {
+            let value: String = row.try_get("entity_json")?;
+            let mut resource: ManagedResource = serde_json::from_str(&value)?;
+            resource.pins = self.resource_pins(&resource.id).await?;
+            resources.push(resource);
+        }
+        Ok(resources)
+    }
+
+    pub async fn get_resource(&self, id: &str) -> anyhow::Result<ManagedResource> {
+        let value = sqlx::query_scalar::<_, String>(
+            "SELECT entity_json FROM managed_resources WHERE id = ?",
+        )
+        .bind(id)
+        .fetch_optional(&self.pool)
+        .await?
+        .ok_or_else(|| anyhow::anyhow!("resource not found: {id}"))?;
+        let mut resource: ManagedResource = serde_json::from_str(&value)?;
+        resource.pins = self.resource_pins(id).await?;
+        Ok(resource)
+    }
+
+    pub async fn set_resource_pin(
+        &self,
+        id: &str,
+        pin: &ResourcePin,
+        present: bool,
+        actor: &str,
+        now: chrono::DateTime<chrono::Utc>,
+    ) -> Result<ManagedResource, ResourceStoreError> {
+        let mut tx = self.pool.begin_with("BEGIN IMMEDIATE").await?;
+        let exists: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM managed_resources WHERE id = ?")
+                .bind(id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Err(ResourceStoreError::NotFound);
+        }
+        let kind = resource_pin_kind_name(pin.kind);
+        let changed = if present {
+            sqlx::query(
+                "INSERT OR IGNORE INTO resource_pins(resource_id, kind, reference_id, created_at) VALUES (?, ?, ?, ?)",
+            )
+            .bind(id)
+            .bind(kind)
+            .bind(&pin.reference_id)
+            .bind(now.to_rfc3339())
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                > 0
+        } else {
+            sqlx::query(
+                "DELETE FROM resource_pins WHERE resource_id = ? AND kind = ? AND reference_id = ?",
+            )
+            .bind(id)
+            .bind(kind)
+            .bind(&pin.reference_id)
+            .execute(&mut *tx)
+            .await?
+            .rows_affected()
+                > 0
+        };
+        if changed {
+            let detail = serde_json::to_string(pin)?;
+            append_resource_event(
+                &mut tx,
+                id,
+                actor,
+                if present { "pin_added" } else { "pin_removed" },
+                now,
+                &detail,
+            )
+            .await?;
+        }
+        tx.commit().await?;
+        self.get_resource(id)
+            .await
+            .map_err(ResourceStoreError::Storage)
+    }
+
+    pub async fn list_resource_events(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+    ) -> anyhow::Result<Vec<ResourceEvent>> {
+        let rows = sqlx::query(
+            "SELECT sequence, resource_id, actor, action, timestamp, detail FROM resource_events WHERE resource_id = ? AND sequence > ? ORDER BY sequence LIMIT ?",
+        )
+        .bind(id)
+        .bind(i64::try_from(after).unwrap_or(i64::MAX))
+        .bind(i64::try_from(limit).unwrap_or(200))
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let sequence: i64 = row.try_get("sequence")?;
+                let sequence = u64::try_from(sequence)
+                    .map_err(|error| ResourceStoreError::Storage(error.into()))?;
+                let timestamp: String = row.try_get("timestamp")?;
+                Ok(ResourceEvent {
+                    sequence,
+                    resource_id: row.try_get("resource_id")?,
+                    actor: row.try_get("actor")?,
+                    action: row.try_get("action")?,
+                    timestamp: chrono::DateTime::parse_from_rfc3339(&timestamp)
+                        .map_err(|error| ResourceStoreError::Storage(error.into()))?
+                        .with_timezone(&chrono::Utc),
+                    detail: row.try_get("detail")?,
+                })
+            })
+            .collect()
+    }
+
+    async fn resource_pins(&self, id: &str) -> anyhow::Result<Vec<ResourcePin>> {
+        let rows = sqlx::query(
+            "SELECT kind, reference_id FROM resource_pins WHERE resource_id = ? ORDER BY kind, reference_id",
+        )
+        .bind(id)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter()
+            .map(|row| {
+                let kind: String = row.try_get("kind")?;
+                Ok(ResourcePin {
+                    kind: serde_json::from_value(serde_json::Value::String(kind))?,
+                    reference_id: row.try_get("reference_id")?,
+                })
+            })
+            .collect()
+    }
+
     async fn read_map(&self, query: &'static str) -> anyhow::Result<Value> {
         let rows = sqlx::query(query).fetch_all(&self.pool).await?;
         let mut entities = Map::new();
@@ -389,6 +637,55 @@ impl Store {
             sequences.insert(lane_id, json!(next));
         }
         Ok(Value::Object(sequences))
+    }
+}
+
+async fn append_resource_event(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    resource_id: &str,
+    actor: &str,
+    action: &str,
+    timestamp: chrono::DateTime<chrono::Utc>,
+    detail: &str,
+) -> Result<(), ResourceStoreError> {
+    sqlx::query(
+        "INSERT INTO resource_events(resource_id, actor, action, timestamp, detail) VALUES (?, ?, ?, ?, ?)",
+    )
+    .bind(resource_id)
+    .bind(actor)
+    .bind(action)
+    .bind(timestamp.to_rfc3339())
+    .bind(detail)
+    .execute(&mut **tx)
+    .await?;
+    Ok(())
+}
+
+fn resource_kind_name(kind: crate::resources::ResourceKind) -> &'static str {
+    match kind {
+        crate::resources::ResourceKind::BuildCache => "build_cache",
+        crate::resources::ResourceKind::Sccache => "sccache",
+        crate::resources::ResourceKind::TemporaryArtifact => "temporary_artifact",
+        crate::resources::ResourceKind::Backup => "backup",
+        crate::resources::ResourceKind::RunLog => "run_log",
+        crate::resources::ResourceKind::ReleaseArtifact => "release_artifact",
+        crate::resources::ResourceKind::ServiceConfiguration => "service_configuration",
+        crate::resources::ResourceKind::Credential => "credential",
+        crate::resources::ResourceKind::FrozenHook => "frozen_hook",
+        crate::resources::ResourceKind::Other => "other",
+    }
+}
+
+fn resource_pin_kind_name(kind: ResourcePinKind) -> &'static str {
+    match kind {
+        ResourcePinKind::ActiveExecution => "active_execution",
+        ResourcePinKind::UnknownExecution => "unknown_execution",
+        ResourcePinKind::CurrentRelease => "current_release",
+        ResourcePinKind::RollbackCandidate => "rollback_candidate",
+        ResourcePinKind::RecoveryBackup => "recovery_backup",
+        ResourcePinKind::FrozenHook => "frozen_hook",
+        ResourcePinKind::ServiceConfiguration => "service_configuration",
+        ResourcePinKind::Manual => "manual",
     }
 }
 
@@ -888,6 +1185,101 @@ mod tests {
                     &CoverageContext::default()
                 )
                 .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resource_registry_rejects_overlaps_and_keeps_append_only_audit() {
+        use crate::resources::{ManagedResource, ResourceKind, ResourcePin, ResourcePinKind};
+
+        let temp = tempfile::tempdir().unwrap();
+        let store = Store::open(&temp.path().join("resources.db"))
+            .await
+            .unwrap();
+        let now = Utc::now();
+        let resource = |id: &str, path: &str| ManagedResource {
+            schema_version: 1,
+            id: id.into(),
+            root_id: "cache".into(),
+            relative_path: path.into(),
+            canonical_path: format!("/managed/{path}"),
+            owner: "autotask".into(),
+            project: "project".into(),
+            kind: ResourceKind::BuildCache,
+            input_digest: "sha256:test".into(),
+            toolchain: "rustc-1.98".into(),
+            platform: "linux-x86_64".into(),
+            observed_bytes: 64,
+            last_used_at: now,
+            recreatable: true,
+            execution_ref: None,
+            created_at: now,
+            updated_at: now,
+            pins: Vec::new(),
+        };
+
+        store
+            .register_resource(resource("cache-one", "cache"), "admin")
+            .await
+            .unwrap();
+        let overlap = store
+            .register_resource(resource("cache-child", "cache/child"), "admin")
+            .await
+            .unwrap_err();
+        assert!(matches!(overlap, ResourceStoreError::Conflict(_)));
+
+        store
+            .set_resource_pin(
+                "cache-one",
+                &ResourcePin {
+                    kind: ResourcePinKind::CurrentRelease,
+                    reference_id: "release-sha".into(),
+                },
+                true,
+                "admin",
+                now,
+            )
+            .await
+            .unwrap();
+        let events = store
+            .list_resource_events("cache-one", 0, 10)
+            .await
+            .unwrap();
+        assert_eq!(
+            events
+                .iter()
+                .map(|event| event.action.as_str())
+                .collect::<Vec<_>>(),
+            ["registered", "pin_added"]
+        );
+        assert!(
+            sqlx::query("UPDATE resource_events SET detail = 'rewritten' WHERE resource_id = ?")
+                .bind("cache-one")
+                .execute(&store.pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM resource_events WHERE resource_id = ?")
+                .bind("cache-one")
+                .execute(&store.pool)
+                .await
+                .is_err()
+        );
+        assert!(
+            sqlx::query("DELETE FROM managed_resources WHERE id = ?")
+                .bind("cache-one")
+                .execute(&store.pool)
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            store
+                .list_resource_events("cache-one", 0, 10)
+                .await
+                .unwrap()
+                .len(),
+            2
         );
     }
 }

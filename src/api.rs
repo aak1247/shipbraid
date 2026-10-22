@@ -10,7 +10,7 @@ use axum::{
     http::{HeaderMap, Request, StatusCode, header::AUTHORIZATION},
     middleware::{self, Next},
     response::{IntoResponse, Response},
-    routing::{get, post},
+    routing::{get, post, put},
 };
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
@@ -23,6 +23,9 @@ use crate::{
     domain::{
         CoverageMode, DeliveryRun, Event, LOCAL_TENANT_ID, Lane, Phase, Priority, ReleaseRequest,
         RequestContext, RequestStatus, State as DomainState,
+    },
+    resources::{
+        ManagedResource, ResourceEvent, ResourceGcPlan, ResourcePin, ResourceRegistration,
     },
     service::{
         RequestActor as Actor, RequestMutation, Service, ServiceError, request_allowed_actions,
@@ -208,6 +211,13 @@ impl From<ServiceError> for ApiError {
                 "The scripted executor could not independently prove the requested state.",
                 false,
             ),
+            ServiceError::InvalidResource(message) => {
+                Self::bad_request("invalid_resource", &message)
+            }
+            ServiceError::ResourceConflict(message) => {
+                Self::new(StatusCode::CONFLICT, "resource_conflict", message, false)
+            }
+            ServiceError::ResourceNotFound => Self::missing("Resource not found."),
             ServiceError::Storage(error) => {
                 tracing::error!(error = %error, "coordinator storage operation failed");
                 Self::new(
@@ -427,6 +437,14 @@ pub fn router(service: Arc<Service>) -> Router {
     let protected = Router::new()
         .route("/system", get(system))
         .route("/artifacts", get(list_artifacts))
+        .route("/resources", get(list_resources))
+        .route("/resources/gc-plan", get(resource_gc_plan))
+        .route("/resources/{resource_id}", put(register_resource))
+        .route(
+            "/resources/{resource_id}/pins",
+            put(add_resource_pin).delete(remove_resource_pin),
+        )
+        .route("/resources/{resource_id}/events", get(resource_events))
         .route("/lanes", get(list_lanes))
         .route("/lanes/{lane_id}", get(get_lane))
         .route("/lanes/{lane_id}/unpause", post(unpause_lane))
@@ -1305,6 +1323,103 @@ async fn list_artifacts(
     Ok(Json(ArtifactsResponse { artifacts }))
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ResourceEventQuery {
+    after: Option<u64>,
+    limit: Option<usize>,
+}
+
+async fn list_resources(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+) -> Result<Json<Items<ManagedResource>>, ApiError> {
+    require_admin(&actor)?;
+    Ok(Json(Items {
+        items: state.service.list_resources().await?,
+    }))
+}
+
+async fn resource_gc_plan(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+) -> Result<Json<ResourceGcPlan>, ApiError> {
+    require_admin(&actor)?;
+    Ok(Json(state.service.resource_gc_plan().await?))
+}
+
+async fn register_resource(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(resource_id): Path<String>,
+    body: Result<Json<ResourceRegistration>, JsonRejection>,
+) -> Result<Json<ManagedResource>, ApiError> {
+    require_admin(&actor)?;
+    let resource = state
+        .service
+        .register_resource(resource_id, parse_body(body)?, &actor.id)
+        .await?;
+    Ok(Json(resource))
+}
+
+async fn add_resource_pin(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(resource_id): Path<String>,
+    body: Result<Json<ResourcePin>, JsonRejection>,
+) -> Result<Json<ManagedResource>, ApiError> {
+    require_admin(&actor)?;
+    Ok(Json(
+        state
+            .service
+            .set_resource_pin(&resource_id, parse_body(body)?, true, &actor.id)
+            .await?,
+    ))
+}
+
+async fn remove_resource_pin(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(resource_id): Path<String>,
+    body: Result<Json<ResourcePin>, JsonRejection>,
+) -> Result<Json<ManagedResource>, ApiError> {
+    require_admin(&actor)?;
+    Ok(Json(
+        state
+            .service
+            .set_resource_pin(&resource_id, parse_body(body)?, false, &actor.id)
+            .await?,
+    ))
+}
+
+async fn resource_events(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(resource_id): Path<String>,
+    query: Result<Query<ResourceEventQuery>, QueryRejection>,
+) -> Result<Json<Items<ResourceEvent>>, ApiError> {
+    require_admin(&actor)?;
+    let Query(query) = query.map_err(|_| {
+        ApiError::bad_request(
+            "invalid_query",
+            "Resource event query parameters are invalid.",
+        )
+    })?;
+    let limit = query.limit.unwrap_or(100);
+    if !(1..=MAX_LIST_LIMIT).contains(&limit) {
+        return Err(ApiError::bad_request(
+            "invalid_limit",
+            "limit must be between 1 and 200.",
+        ));
+    }
+    Ok(Json(Items {
+        items: state
+            .service
+            .resource_events(&resource_id, query.after.unwrap_or_default(), limit)
+            .await?,
+    }))
+}
+
 fn collect_artifacts(
     root: &std::path::Path,
     current: &std::path::Path,
@@ -1688,6 +1803,7 @@ mod tests {
     use super::*;
     use crate::{
         config::{Config, LaneConfig, LaneExecutorConfig, TokenConfig},
+        resources::ResourceRootConfig,
         service::Service,
     };
 
@@ -1738,6 +1854,7 @@ mod tests {
         app: Router,
         tokens: std::collections::BTreeMap<String, String>,
         revision: String,
+        resource_root: PathBuf,
     }
 
     async fn team_fixture() -> TeamFixture {
@@ -1753,6 +1870,8 @@ mod tests {
         parameters: std::collections::BTreeMap<String, crate::domain::ParameterSpec>,
     ) -> TeamFixture {
         let temp = tempfile::tempdir().unwrap();
+        let resource_root = temp.path().join("managed-resources");
+        std::fs::create_dir(&resource_root).unwrap();
         let work = temp.path().join("work");
         std::fs::create_dir(&work).unwrap();
         git(&work, &["init", "-b", "release"]);
@@ -1817,6 +1936,7 @@ mod tests {
             allow_descendant: true,
             allow_preemption: true,
             failure_observe: None,
+            resource_admission: None,
             request_parameters: parameters.clone(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
@@ -1825,6 +1945,12 @@ mod tests {
             database_path: temp.path().join("ledger.db"),
             tokens: configured,
             lanes: vec![lane(lane_one_id, "lane-one"), lane("lane-two", "lane-two")],
+            resource_roots: vec![ResourceRootConfig {
+                id: "build-cache".into(),
+                path: resource_root.clone(),
+                managed_budget_bytes: 1,
+                minimum_free_bytes: 0,
+            }],
             ..Config::default()
         })
         .await
@@ -1841,6 +1967,7 @@ mod tests {
             app,
             tokens,
             revision,
+            resource_root,
         }
     }
 
@@ -1897,6 +2024,102 @@ mod tests {
                 panic!("non-JSON response: {}", String::from_utf8_lossy(&bytes))
             }),
         )
+    }
+
+    #[tokio::test]
+    async fn resource_routes_are_admin_only_scoped_and_read_only() {
+        let f = team_fixture().await;
+        let resource_path = f.resource_root.join("brotli-v1");
+        std::fs::create_dir(&resource_path).unwrap();
+        std::fs::create_dir(resource_path.join("nested")).unwrap();
+        let path = "/v1/resources/autotask-brotli-v1";
+        let body = json!({
+            "root_id": "build-cache",
+            "relative_path": "brotli-v1",
+            "owner": "autotask",
+            "project": "shared-cache",
+            "kind": "build_cache",
+            "input_digest": "sha256:abc123",
+            "toolchain": "rustc-1.98",
+            "platform": "linux-x86_64",
+            "observed_bytes": 4096,
+            "recreatable": true
+        });
+
+        let (status, _) = f.call("alice", "PUT", path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        let (status, oversized) = f
+            .call(
+                "admin",
+                "PUT",
+                "/v1/resources/oversized-resource",
+                Some(json!({"padding": "x".repeat(MAX_REQUEST_BODY)})),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(oversized["code"], "invalid_json");
+        let (status, registered) = f.call("admin", "PUT", path, Some(body.clone())).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(registered["id"], "autotask-brotli-v1");
+        assert_eq!(registered["root_id"], "build-cache");
+        assert_eq!(
+            registered["canonical_path"],
+            resource_path.to_string_lossy().as_ref()
+        );
+
+        let mut overlap = body.clone();
+        overlap["relative_path"] = json!("brotli-v1/nested");
+        let (status, conflict) = f
+            .call(
+                "admin",
+                "PUT",
+                "/v1/resources/overlapping-resource",
+                Some(overlap),
+            )
+            .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(conflict["code"], "resource_conflict");
+
+        let mut traversal = body.clone();
+        traversal["relative_path"] = json!("../source.git");
+        let (status, invalid) = f
+            .call(
+                "admin",
+                "PUT",
+                "/v1/resources/traversal-resource",
+                Some(traversal),
+            )
+            .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(invalid["code"], "invalid_resource");
+
+        let pin = json!({"kind":"current_release","reference_id":"release-sha"});
+        let (status, pinned) = f
+            .call("admin", "PUT", &format!("{path}/pins"), Some(pin.clone()))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(pinned["pins"].as_array().unwrap().len(), 1);
+        let (status, events) = f
+            .call(
+                "admin",
+                "GET",
+                "/v1/resources/autotask-brotli-v1/events?after=0&limit=10",
+                None,
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(events["items"].as_array().unwrap().len(), 2);
+
+        let (status, unpinned) = f
+            .call("admin", "DELETE", &format!("{path}/pins"), Some(pin))
+            .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(unpinned["pins"].as_array().unwrap().len(), 0);
+        let (status, plan) = f.call("admin", "GET", "/v1/resources/gc-plan", None).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(plan["read_only"], true);
+        assert_eq!(plan["roots"][0]["selected"][0]["id"], "autotask-brotli-v1");
+        assert!(resource_path.exists());
     }
 
     #[tokio::test]
@@ -2358,6 +2581,7 @@ mod tests {
             allow_descendant: true,
             allow_preemption: true,
             failure_observe: None,
+            resource_admission: None,
             request_parameters: Default::default(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
@@ -2557,6 +2781,7 @@ mod tests {
                 allow_descendant: true,
                 allow_preemption: true,
                 failure_observe: None,
+                resource_admission: None,
                 request_parameters: Default::default(),
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,

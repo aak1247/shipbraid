@@ -465,6 +465,7 @@ impl Engine {
             replacement_run_id: None,
             cancel_reason: None,
             receipt_id: None,
+            resource_reservation: None,
             created_at: now,
             phase_started_at: now,
             updated_at: now,
@@ -1481,6 +1482,44 @@ impl Engine {
         }
     }
 
+    pub fn resource_capacity_blocked(
+        &self,
+        state: &mut State,
+        lane_id: &str,
+        reason: &str,
+        now: DateTime<Utc>,
+    ) -> Result<(), DomainError> {
+        self.expire(state, now);
+        let lane = state
+            .lanes
+            .get(lane_id)
+            .cloned()
+            .ok_or_else(|| DomainError::LaneNotFound(lane_id.to_owned()))?;
+        mark_stale_lane_requests(state, &lane, now);
+        let changed = state.requests.values().any(|request| {
+            request.lane_id == lane_id
+                && request.current_run_id.is_none()
+                && matches!(
+                    request.status,
+                    RequestStatus::Accepted | RequestStatus::Waiting
+                )
+                && !same_resource_capacity_condition(request.waiting_reason.as_deref(), reason)
+        });
+        set_waiting_reason(state, lane_id, reason);
+        if changed {
+            emit(
+                state,
+                lane_id,
+                None,
+                None,
+                now,
+                "resource_capacity_blocked",
+                reason,
+            );
+        }
+        Ok(())
+    }
+
     pub fn mark_unknown(
         &self,
         state: &mut State,
@@ -1919,6 +1958,7 @@ impl Engine {
             replacement_run_id: None,
             cancel_reason: None,
             receipt_id: None,
+            resource_reservation: None,
             created_at: now,
             phase_started_at: now,
             updated_at: now,
@@ -2555,6 +2595,22 @@ fn validate_evidence(evidence_digest: &str) -> Result<(), DomainError> {
         return Err(DomainError::OwnershipUnproven);
     }
     Ok(())
+}
+
+fn same_resource_capacity_condition(previous: Option<&str>, current: &str) -> bool {
+    let Some(previous) = previous else {
+        return false;
+    };
+    if previous == current {
+        return true;
+    }
+    fn root_id(reason: &str) -> Option<&str> {
+        reason
+            .strip_prefix("resource_capacity_unavailable(root_id=")?
+            .split_once(',')
+            .map(|(root_id, _)| root_id)
+    }
+    matches!((root_id(previous), root_id(current)), (Some(left), Some(right)) if left == right)
 }
 
 fn set_waiting_reason(state: &mut State, lane_id: &str, reason: &str) {

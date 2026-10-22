@@ -450,6 +450,7 @@ mod tests {
             enabled: true,
             executor,
             failure_observe,
+            resource_admission: None,
         }
     }
 

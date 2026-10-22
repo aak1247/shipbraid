@@ -405,6 +405,7 @@ mod tests {
             replacement_run_id: None,
             cancel_reason: None,
             receipt_id: None,
+            resource_reservation: None,
             created_at: Utc::now(),
             phase_started_at: Utc::now(),
             updated_at: Utc::now(),

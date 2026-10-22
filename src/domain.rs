@@ -298,9 +298,17 @@ pub struct DeliveryRun {
     pub replacement_run_id: Option<Id>,
     pub cancel_reason: Option<String>,
     pub receipt_id: Option<Id>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub resource_reservation: Option<ResourceReservation>,
     pub created_at: DateTime<Utc>,
     pub phase_started_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub struct ResourceReservation {
+    pub root_id: String,
+    pub bytes: u64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]

@@ -24,18 +24,59 @@ use crate::{
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, CoverageMode, DomainError,
         ExecutorResult, LOCAL_TENANT_ID, Lane, Phase, Priority, ReconcileIds, ReleaseRequest,
-        RequestContext, RequestStatus, RunState, State, SubmitInput, SubmitOutcome, Target,
-        UnknownResolution,
+        RequestContext, RequestStatus, ResourceReservation, RunState, State, SubmitInput,
+        SubmitOutcome, Target, UnknownResolution,
     },
     engine::{Engine, EngineConfig},
     executor::{Executor, ScriptedExecutor},
     hooks::{HookCall, HookEnvelope, HookExecutor, HookOperation, HookReply, HookStatus},
     lineage::{CoverageContext, CoverageQuery, LineageResolver, is_full_revision},
-    store::Store,
+    resources::{
+        ManagedResource, ResourceAdmissionConfig, ResourceGcPlan, ResourcePin,
+        ResourceRegistration, ResourceRootConfig, active_reservations_on_filesystem, build_gc_plan,
+        resolve_resource_path, roots_on_filesystem, validate_resource_id,
+    },
+    store::{ResourceStoreError, Store},
 };
 
 const MAX_PENDING_REQUESTS_PER_LANE: usize = 1_000;
 const MAX_MANUAL_RETRIES: u32 = 3;
+
+fn validate_resource_text(field: &str, value: &str, max_bytes: usize) -> Result<(), ServiceError> {
+    if value.trim().is_empty() || value.len() > max_bytes || value.chars().any(char::is_control) {
+        return Err(ServiceError::InvalidResource(format!(
+            "{field} must be nonempty, at most {max_bytes} bytes, and contain no control characters"
+        )));
+    }
+    Ok(())
+}
+
+fn ensure_same_filesystem(root: &Path, resource: &Path) -> Result<(), ServiceError> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::MetadataExt;
+        let root_device = std::fs::metadata(root)
+            .map_err(|error| ServiceError::Storage(error.into()))?
+            .dev();
+        let resource_device = std::fs::metadata(resource)
+            .map_err(|error| ServiceError::Storage(error.into()))?
+            .dev();
+        if root_device != resource_device {
+            return Err(ServiceError::InvalidResource(
+                "resource path must be on the configured root's filesystem".into(),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn map_resource_store_error(error: ResourceStoreError) -> ServiceError {
+    match error {
+        ResourceStoreError::NotFound => ServiceError::ResourceNotFound,
+        ResourceStoreError::Conflict(message) => ServiceError::ResourceConflict(message),
+        ResourceStoreError::Storage(error) => ServiceError::Storage(error),
+    }
+}
 
 #[derive(Clone)]
 pub(crate) struct RequestActor {
@@ -116,6 +157,12 @@ pub enum ServiceError {
     NotReady,
     #[error("the requested operation cannot be proven from the scripted executor record")]
     UnprovenExecutorState,
+    #[error("invalid resource registration: {0}")]
+    InvalidResource(String),
+    #[error("resource conflict: {0}")]
+    ResourceConflict(String),
+    #[error("resource was not found")]
+    ResourceNotFound,
 }
 
 impl From<anyhow::Error> for ServiceError {
@@ -135,6 +182,7 @@ pub struct Service {
     lineage: LineageResolver,
     executor: ScriptedExecutor,
     lane_executors: BTreeMap<String, LaneExecutorConfig>,
+    resource_roots: Vec<ResourceRootConfig>,
     _database_lock: DatabaseLock,
     ready: AtomicBool,
 }
@@ -167,13 +215,74 @@ impl Service {
             }
         }
         let lineage = LineageResolver::new(mirrors).context("validate local bare Git mirrors")?;
+        let mut resource_roots = Vec::with_capacity(config.resource_roots.len());
+        for root in &config.resource_roots {
+            let mut canonical = root.clone();
+            canonical.path = root
+                .path
+                .canonicalize()
+                .with_context(|| format!("resolve resource root {}", root.path.display()))?;
+            if !canonical.path.is_dir() {
+                bail!("resource root {} must be a directory", root.id);
+            }
+            if resource_roots.iter().any(|existing: &ResourceRootConfig| {
+                crate::resources::paths_overlap(&canonical.path, &existing.path)
+            }) {
+                bail!("configured resource roots must not overlap");
+            }
+            resource_roots.push(canonical);
+        }
         let store = Store::open(&database_path).await?;
         let mut state = store.load_state().await?;
+        let before_config = state.clone();
+        let configured_lane_admission = config
+            .lanes
+            .iter()
+            .filter_map(|lane| {
+                lane.resource_admission
+                    .as_ref()
+                    .map(|admission| (lane.id.as_str(), admission))
+            })
+            .collect::<BTreeMap<_, _>>();
+        let runs_missing_reservations = state
+            .runs
+            .values()
+            .filter(|run| {
+                crate::resources::run_holds_reservation(&state, run.id, &run.state)
+                    && run.resource_reservation.is_none()
+            })
+            .map(|run| run.id)
+            .collect::<Vec<_>>();
+        for run_id in runs_missing_reservations {
+            let run = state.runs.get_mut(&run_id).expect("collected run exists");
+            if let Some(admission) = configured_lane_admission.get(run.lane_id.as_str()) {
+                run.resource_reservation = Some(ResourceReservation {
+                    root_id: admission.root_id.clone(),
+                    bytes: admission.reservation_bytes,
+                });
+            }
+        }
+        let configured_resource_roots = resource_roots
+            .iter()
+            .map(|root| root.id.as_str())
+            .collect::<BTreeSet<_>>();
+        if state.runs.values().any(|run| {
+            crate::resources::run_holds_reservation(&state, run.id, &run.state)
+                && run
+                    .resource_reservation
+                    .as_ref()
+                    .is_some_and(|reservation| {
+                        !configured_resource_roots.contains(reservation.root_id.as_str())
+                    })
+        }) {
+            bail!(
+                "an active or unknown execution holds a reservation on a resource root that is no longer configured"
+            );
+        }
         if config.mode == ConfigMode::Local {
             let project = &config.lanes[0].project;
             validate_local_history(&state, project)?;
         }
-        let before_config = state.clone();
         let engine = Engine::new(EngineConfig {
             max_active_runs: config.max_active_runs,
             coalesce_window: ChronoDuration::milliseconds(
@@ -298,6 +407,7 @@ impl Service {
                 .iter()
                 .map(|lane| (lane.id.clone(), lane.executor.clone()))
                 .collect(),
+            resource_roots,
             _database_lock: database_lock,
             ready: AtomicBool::new(true),
         });
@@ -341,6 +451,156 @@ impl Service {
 
     pub async fn snapshot(&self) -> State {
         self.state.read().await.clone()
+    }
+
+    pub async fn register_resource(
+        &self,
+        id: String,
+        registration: ResourceRegistration,
+        actor: &str,
+    ) -> Result<ManagedResource, ServiceError> {
+        validate_resource_id(&id).map_err(ServiceError::InvalidResource)?;
+        validate_resource_text("owner", &registration.owner, 128)?;
+        validate_resource_text("project", &registration.project, 128)?;
+        validate_resource_text("input_digest", &registration.input_digest, 512)?;
+        validate_resource_text("toolchain", &registration.toolchain, 512)?;
+        validate_resource_text("platform", &registration.platform, 512)?;
+        if let Some(reference) = &registration.execution_ref {
+            validate_resource_text("execution_ref", reference, 128)?;
+        }
+        let root = self
+            .resource_roots
+            .iter()
+            .find(|root| root.id == registration.root_id)
+            .ok_or_else(|| {
+                ServiceError::InvalidResource(
+                    "root_id is not an administrator-configured resource root".into(),
+                )
+            })?;
+        let canonical_path = resolve_resource_path(&root.path, &registration.relative_path)
+            .map_err(ServiceError::InvalidResource)?;
+        if canonical_path.to_string_lossy().len() > 4096 {
+            return Err(ServiceError::InvalidResource(
+                "resolved resource path is too long".into(),
+            ));
+        }
+        ensure_same_filesystem(&root.path, &canonical_path)?;
+        if let Some(last_used_at) = registration.last_used_at
+            && last_used_at > Utc::now() + ChronoDuration::minutes(5)
+        {
+            return Err(ServiceError::InvalidResource(
+                "last_used_at cannot be more than five minutes in the future".into(),
+            ));
+        }
+
+        let now = Utc::now();
+        let existing = self
+            .store
+            .list_resources()
+            .await
+            .map_err(ServiceError::Storage)?
+            .into_iter()
+            .find(|resource| resource.id == id);
+        if let Some(existing) = &existing
+            && (existing.root_id != registration.root_id
+                || existing.canonical_path != canonical_path.to_string_lossy())
+        {
+            return Err(ServiceError::ResourceConflict(
+                "a resource id cannot be moved to another root or path".into(),
+            ));
+        }
+        let resource = ManagedResource {
+            schema_version: 1,
+            id,
+            root_id: registration.root_id,
+            relative_path: registration.relative_path,
+            canonical_path: canonical_path.to_string_lossy().into_owned(),
+            owner: registration.owner,
+            project: registration.project,
+            kind: registration.kind,
+            input_digest: registration.input_digest,
+            toolchain: registration.toolchain,
+            platform: registration.platform,
+            observed_bytes: registration.observed_bytes,
+            last_used_at: registration.last_used_at.unwrap_or(now),
+            recreatable: registration.recreatable,
+            execution_ref: registration.execution_ref,
+            created_at: existing
+                .as_ref()
+                .map_or(now, |resource| resource.created_at),
+            updated_at: now,
+            pins: Vec::new(),
+        };
+        self.store
+            .register_resource(resource, actor)
+            .await
+            .map_err(map_resource_store_error)
+    }
+
+    pub async fn list_resources(&self) -> Result<Vec<ManagedResource>, ServiceError> {
+        self.store
+            .list_resources()
+            .await
+            .map_err(ServiceError::Storage)
+    }
+
+    pub async fn set_resource_pin(
+        &self,
+        id: &str,
+        pin: ResourcePin,
+        present: bool,
+        actor: &str,
+    ) -> Result<ManagedResource, ServiceError> {
+        validate_resource_id(id).map_err(ServiceError::InvalidResource)?;
+        validate_resource_text("pin reference_id", &pin.reference_id, 256)?;
+        self.store
+            .set_resource_pin(id, &pin, present, actor, Utc::now())
+            .await
+            .map_err(map_resource_store_error)
+    }
+
+    pub async fn resource_events(
+        &self,
+        id: &str,
+        after: u64,
+        limit: usize,
+    ) -> Result<Vec<crate::resources::ResourceEvent>, ServiceError> {
+        validate_resource_id(id).map_err(ServiceError::InvalidResource)?;
+        if !self
+            .store
+            .list_resources()
+            .await
+            .map_err(ServiceError::Storage)?
+            .iter()
+            .any(|resource| resource.id == id)
+        {
+            return Err(ServiceError::ResourceNotFound);
+        }
+        self.store
+            .list_resource_events(id, after, limit.clamp(1, 200))
+            .await
+            .map_err(ServiceError::Storage)
+    }
+
+    pub async fn resource_gc_plan(&self) -> Result<ResourceGcPlan, ServiceError> {
+        let resources = self
+            .store
+            .list_resources()
+            .await
+            .map_err(ServiceError::Storage)?;
+        let state = self.state.read().await;
+        let available = self
+            .resource_roots
+            .iter()
+            .map(|root| (root.id.clone(), fs2::available_space(&root.path).ok()))
+            .collect::<BTreeMap<_, _>>();
+        Ok(build_gc_plan(
+            &resources,
+            &state,
+            &self.resource_roots,
+            &available,
+            Utc::now(),
+        ))
     }
 
     pub async fn ready(&self) -> Result<(), ServiceError> {
@@ -978,6 +1238,20 @@ impl Service {
         self.transact_locked(previous, coverage, apply).await
     }
 
+    async fn transact_with_previous<T>(
+        &self,
+        lane_id: Option<&str>,
+        apply: impl FnOnce(&Engine, &State, &mut State, &CoverageContext) -> Result<T, ServiceError>,
+    ) -> Result<T, ServiceError> {
+        let _writer = self.writer.lock().await;
+        let previous = self.state.read().await.clone();
+        let coverage = self.coverage_context(&previous, None, lane_id);
+        let mut next = previous.clone();
+        let result = apply(&self.engine, &previous, &mut next, &coverage)?;
+        self.commit_publish(&previous, next).await?;
+        Ok(result)
+    }
+
     async fn transact_locked<T>(
         &self,
         previous: State,
@@ -1081,22 +1355,116 @@ impl Service {
             .cloned()
             .collect::<Vec<_>>();
         for lane_id in lane_ids {
-            self.transact(Some(&lane_id), |engine, state, coverage| {
+            let admission = self
+                .config
+                .lanes
+                .iter()
+                .find(|lane| lane.id == lane_id)
+                .and_then(|lane| lane.resource_admission.clone());
+            self.transact_with_previous(Some(&lane_id), |engine, previous, state, coverage| {
+                let now = Utc::now();
+                if let Some(admission) = admission.as_ref()
+                    && let Some(reason) =
+                        self.resource_admission_block_reason(previous, admission, None)
+                {
+                    engine.resource_capacity_blocked(state, &lane_id, &reason, now)?;
+                    return Ok(());
+                }
+                let existing_runs = state.runs.keys().copied().collect::<BTreeSet<_>>();
                 engine.reconcile(
                     state,
                     &lane_id,
-                    Utc::now(),
+                    now,
                     ReconcileIds {
                         run_id: Uuid::new_v4(),
                         command_id: Uuid::new_v4(),
                     },
                     coverage,
                 )?;
+                let created_run = state
+                    .runs
+                    .values()
+                    .find(|run| run.lane_id == lane_id && !existing_runs.contains(&run.id))
+                    .map(|run| run.id);
+                if let (Some(run_id), Some(admission)) = (created_run, admission.as_ref()) {
+                    if let Some(reason) =
+                        self.resource_admission_block_reason(state, admission, Some(run_id))
+                    {
+                        *state = previous.clone();
+                        engine.resource_capacity_blocked(state, &lane_id, &reason, now)?;
+                        return Ok(());
+                    }
+                    if let Some(run) = state.runs.get_mut(&run_id) {
+                        run.resource_reservation = Some(ResourceReservation {
+                            root_id: admission.root_id.clone(),
+                            bytes: admission.reservation_bytes,
+                        });
+                    }
+                }
                 Ok(())
             })
             .await?;
         }
         Ok(())
+    }
+
+    fn resource_admission_block_reason(
+        &self,
+        state: &State,
+        admission: &ResourceAdmissionConfig,
+        newly_planned_run: Option<Uuid>,
+    ) -> Option<String> {
+        let root = self
+            .resource_roots
+            .iter()
+            .find(|root| root.id == admission.root_id)?;
+        let unreserved_active_runs = state
+            .runs
+            .values()
+            .filter(|run| Some(run.id) != newly_planned_run)
+            .filter(|run| crate::resources::run_holds_reservation(state, run.id, &run.state))
+            .filter(|run| run.resource_reservation.is_none())
+            .count();
+        if unreserved_active_runs > 0 {
+            return Some(format!(
+                "resource_capacity_unavailable(root_id={}, reason=active_run_reservation_unknown, unreserved_active_runs={})",
+                root.id, unreserved_active_runs
+            ));
+        }
+        let available = match fs2::available_space(&root.path) {
+            Ok(available) => available,
+            Err(_) => {
+                return Some(format!(
+                    "resource_capacity_unavailable(root_id={}, reason=filesystem_status_unknown)",
+                    root.id
+                ));
+            }
+        };
+        let active_reserved_bytes =
+            active_reservations_on_filesystem(state, &self.resource_roots, &root.id)
+                .values()
+                .copied()
+                .fold(0_u64, u64::saturating_add);
+        let filesystem_minimum_free_bytes = roots_on_filesystem(&self.resource_roots, &root.id)
+            .iter()
+            .map(|filesystem_root| filesystem_root.minimum_free_bytes)
+            .max()
+            .unwrap_or(root.minimum_free_bytes);
+        let required_bytes = active_reserved_bytes
+            .saturating_add(admission.reservation_bytes)
+            .saturating_add(filesystem_minimum_free_bytes);
+        if available < required_bytes {
+            Some(format!(
+                "resource_capacity_unavailable(root_id={}, available_bytes={}, active_reserved_bytes={}, requested_reservation_bytes={}, minimum_free_bytes={})",
+                root.id,
+                available,
+                active_reserved_bytes,
+                admission.reservation_bytes,
+                filesystem_minimum_free_bytes
+            ))
+        } else {
+            None
+        }
     }
 
     async fn advance_running_phases(&self) -> Result<(), ServiceError> {
@@ -2595,6 +2963,7 @@ mod tests {
                 allow_descendant: false,
                 allow_preemption: false,
                 failure_observe: None,
+                resource_admission: None,
                 request_parameters: BTreeMap::new(),
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
@@ -2606,9 +2975,225 @@ mod tests {
             coalesce_ms: 0,
             dashboard_dir: None,
             artifacts_dir: None,
+            resource_roots: vec![],
         };
         let service = Service::open(config).await.unwrap();
         (temp, service)
+    }
+
+    async fn resource_capacity_test_service() -> (tempfile::TempDir, Config, Arc<Service>, String) {
+        let temp = tempfile::tempdir().unwrap();
+        let work = temp.path().join("work");
+        std::fs::create_dir(&work).unwrap();
+        let git = |args: &[&str]| {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&work)
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "git command failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8_lossy(&output.stdout).trim().to_owned()
+        };
+        git(&["init", "-b", "release"]);
+        git(&["config", "user.name", "Capacity Fixture"]);
+        git(&["config", "user.email", "capacity@example.invalid"]);
+        std::fs::write(work.join("app.txt"), "capacity fixture").unwrap();
+        git(&["add", "app.txt"]);
+        git(&["commit", "-m", "fixture"]);
+        let revision = git(&["rev-parse", "HEAD"]);
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["clone", "--mirror"])
+            .arg(&work)
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "git mirror clone failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let resource_root = temp.path().join("managed-cache");
+        std::fs::create_dir(&resource_root).unwrap();
+        let config = Config {
+            mode: ConfigMode::Server,
+            database_path: temp.path().join("capacity.db"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: "PATH".into(),
+                lanes: vec!["lane".into()],
+                projects: Vec::new(),
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "lane".into(),
+                project: "project".into(),
+                environment: "test".into(),
+                repository_id: "repo".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/release".into(),
+                profile_digest: "profile".into(),
+                components: vec!["app".into()],
+                request_parameters: BTreeMap::new(),
+                allow_descendant: false,
+                allow_preemption: false,
+                enabled: true,
+                executor: LaneExecutorConfig::Scripted,
+                failure_observe: None,
+                resource_admission: Some(ResourceAdmissionConfig {
+                    root_id: "cache".into(),
+                    reservation_bytes: 1024,
+                }),
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+            artifacts_dir: None,
+            resource_roots: vec![ResourceRootConfig {
+                id: "cache".into(),
+                path: resource_root,
+                managed_budget_bytes: 1024 * 1024,
+                minimum_free_bytes: u64::MAX,
+            }],
+        };
+        let service = Service::open(config.clone()).await.unwrap();
+        (temp, config, service, revision)
+    }
+
+    #[tokio::test]
+    async fn insufficient_resources_leave_requests_queued_without_dispatch() {
+        let (_temp, _config, service, revision) = resource_capacity_test_service().await;
+        let outcome = service
+            .submit(
+                "operator".into(),
+                "capacity-request".into(),
+                "request-hash".into(),
+                "lane".into(),
+                revision,
+                vec!["app".into()],
+                CoverageMode::Exact,
+                Priority::Normal,
+                None,
+                "resource admission test".into(),
+            )
+            .await
+            .unwrap();
+
+        service.scheduler_tick().await.unwrap();
+        let state = service.snapshot().await;
+        let request = &state.requests[&outcome.request_id];
+        assert_eq!(request.status, RequestStatus::Waiting);
+        assert!(request.current_run_id.is_none());
+        let reason = request.waiting_reason.as_deref().unwrap();
+        assert!(reason.starts_with("resource_capacity_unavailable("));
+        assert!(state.runs.is_empty());
+        assert!(state.commands.is_empty());
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event.kind == "resource_capacity_blocked")
+                .count(),
+            1
+        );
+
+        service.scheduler_tick().await.unwrap();
+        let state = service.snapshot().await;
+        assert!(state.runs.is_empty());
+        assert_eq!(
+            state
+                .events
+                .iter()
+                .filter(|event| event.kind == "resource_capacity_blocked")
+                .count(),
+            1,
+            "a repeated capacity wait is deduplicated and must not dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_freezes_current_admission_for_legacy_active_runs() {
+        let (_temp, config, service, _) = resource_capacity_test_service().await;
+        let previous = service.snapshot().await;
+        let mut next = previous.clone();
+        let now = Utc::now();
+        let run_id = Uuid::new_v4();
+        next.lanes.get_mut("lane").unwrap().active_run_id = Some(run_id);
+        next.lanes.get_mut("lane").unwrap().generation = 1;
+        next.runs.insert(
+            run_id,
+            crate::domain::DeliveryRun {
+                id: run_id,
+                lane_id: "lane".into(),
+                target: Target {
+                    repository_id: "repo".into(),
+                    revision: "a".repeat(40),
+                    components: BTreeSet::from(["app".into()]),
+                    profile_digest: "profile".into(),
+                    release_line_id: "repo:refs/heads/release".into(),
+                    config_version: 1,
+                    coverage_mode: CoverageMode::Exact,
+                    parameters: BTreeMap::new(),
+                },
+                effective_priority: Priority::Normal,
+                state: RunState::Unknown,
+                phase: Phase::Building,
+                generation: 1,
+                executor_ref: Some("legacy-unknown".into()),
+                replacement_run_id: None,
+                cancel_reason: None,
+                receipt_id: None,
+                resource_reservation: None,
+                created_at: now,
+                phase_started_at: now,
+                updated_at: now,
+            },
+        );
+        service
+            .store
+            .commit_transition(&previous, &next)
+            .await
+            .unwrap();
+        drop(service);
+
+        let reopened = Service::open(config).await.unwrap();
+        let state = reopened.snapshot().await;
+        assert_eq!(
+            state.runs[&run_id].resource_reservation,
+            Some(ResourceReservation {
+                root_id: "cache".into(),
+                bytes: 1024,
+            })
+        );
+
+        let mut unverifiable_legacy = state.clone();
+        unverifiable_legacy
+            .runs
+            .get_mut(&run_id)
+            .unwrap()
+            .resource_reservation = None;
+        let blocked = reopened
+            .resource_admission_block_reason(
+                &unverifiable_legacy,
+                &ResourceAdmissionConfig {
+                    root_id: "cache".into(),
+                    reservation_bytes: 1024,
+                },
+                None,
+            )
+            .unwrap();
+        assert!(blocked.contains("active_run_reservation_unknown"));
     }
 
     async fn hook_test_service() -> (tempfile::TempDir, Config, Arc<Service>, PathBuf) {
@@ -2685,6 +3270,7 @@ print(json.dumps(reply))
                 allow_descendant: false,
                 allow_preemption: false,
                 failure_observe: None,
+                resource_admission: None,
                 request_parameters: BTreeMap::new(),
                 enabled: true,
                 executor: LaneExecutorConfig::Hooks {
@@ -2700,6 +3286,7 @@ print(json.dumps(reply))
             coalesce_ms: 0,
             dashboard_dir: None,
             artifacts_dir: None,
+            resource_roots: vec![],
         };
         let service = Service::open(config.clone()).await.unwrap();
         (temp, config, service, marker)

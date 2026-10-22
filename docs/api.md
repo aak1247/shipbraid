@@ -26,8 +26,55 @@ Lane/run/event lists return `{ "items": [...] }`. Request lists return `{ "items
 | POST | `/v1/executor-events` | Executor: report a fenced execution event |
 | POST | `/v1/lanes/{id}/unpause` | Admin: clear lane failure pause |
 | POST | `/v1/lanes/{id}/resolve-unknown` | Admin: reconcile independently observed evidence |
+| GET | `/v1/resources` | Admin: registered resource inventory |
+| GET | `/v1/resources/{id}/events?after=0&limit=100` | Admin: append-only resource audit events |
+| GET | `/v1/resources/gc-plan` | Admin: read-only reclaim estimate; never deletes files |
+| PUT | `/v1/resources/{id}` | Admin: register or refresh an existing resource below a configured root |
+| PUT / DELETE | `/v1/resources/{id}/pins` | Admin: add or remove a retention pin, with audit |
 
 Cursor sequences belong to a lane. Events require `lane_id`, including the first page; logs belong to a single run. When a request follows a successor, start that run's log cursor at zero.
+
+## Managed resources and dispatch capacity
+
+Resource roots and per-lane reservations are optional administrator configuration. Existing configurations that omit them keep the current admission behavior:
+
+```toml
+[[resource_roots]]
+id = "autotask-build-cache"
+path = "/home/service/.cache/autotask-build"
+managed_budget_bytes = 2684354560 # 512 MiB Brotli + 2 GiB entries
+minimum_free_bytes = 1073741824
+
+# Inside the matching [[lanes]] entry:
+[lanes.resource_admission]
+root_id = "autotask-build-cache"
+reservation_bytes = 805306368
+```
+
+Each root path must be an existing absolute directory. Root IDs and resource IDs match `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}`. Configured roots cannot overlap. `managed_budget_bytes` is an inventory budget for resources registered to that root; it is separate from filesystem free space and is not an automatic deletion threshold. `minimum_free_bytes` is the free-space floor for the whole filesystem. When multiple roots share one filesystem, Shipbraid combines their active reservations and uses the largest configured free-space floor for that filesystem.
+
+On each dispatch attempt, a lane with `resource_admission` reserves its fixed configured bytes only when current filesystem free space covers all active reservations, the new reservation, and the filesystem free-space floor. Request bodies cannot choose a root or byte budget. Active, cancellation-unconfirmed, and unknown runs retain their reservation; a planned preemption successor is counted alongside the old active owner. If capacity is insufficient or filesystem capacity cannot be read, the request remains queued with a `waiting_reason` such as `resource_capacity_unavailable(...)`; no run or dispatch command is created. Lanes without this setting remain unchanged.
+
+The resource API requires an admin token. Registration accepts an existing path relative to a configured root, and the resolved path must remain below that root and on its filesystem. It rejects missing paths, traversal, root-directory registration, repeated IDs moved to another path, and duplicate or overlapping paths. A registration body has this shape:
+
+```json
+{
+  "root_id": "autotask-build-cache",
+  "relative_path": "brotli-v1",
+  "owner": "autotask",
+  "project": "shared-build-cache",
+  "kind": "build_cache",
+  "input_digest": "sha256:...",
+  "toolchain": "rustc-1.98",
+  "platform": "linux-x86_64",
+  "observed_bytes": 123456,
+  "last_used_at": "2026-10-22T12:00:00Z",
+  "recreatable": true,
+  "execution_ref": null
+}
+```
+
+Kinds that may appear as GC candidates are `build_cache`, `sccache`, and `temporary_artifact`, and only when marked recreatable. Pins (`active_execution`, `unknown_execution`, `current_release`, `rollback_candidate`, `recovery_backup`, `frozen_hook`, `service_configuration`, or `manual` plus a `reference_id`) protect a resource. Unconfigured roots, missing or moved paths, unresolved run references, non-recreatable data, and active/unknown reservations are reported as blockers. Audit events are append-only and registrations cannot be deleted through SQL; pin removal is itself audited. `gc-plan` reports estimates and selected candidates only. It has no apply mode and never removes content, request/run/receipt history, release state, service configuration, credentials, or frozen hooks.
 
 ## Log queries
 

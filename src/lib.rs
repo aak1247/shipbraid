@@ -7,5 +7,6 @@ pub mod executor;
 pub mod hooks;
 pub mod lineage;
 pub mod local;
+pub mod resources;
 pub mod service;
 pub mod store;

@@ -827,6 +827,7 @@ mod tests {
             enabled: true,
             executor: Default::default(),
             failure_observe: None,
+            resource_admission: None,
         }
     }
 

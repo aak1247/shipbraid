@@ -8,6 +8,7 @@ use std::{
 };
 
 use crate::domain::{ParameterSpec, validate_parameter_specs};
+use crate::resources::{ResourceAdmissionConfig, ResourceRootConfig};
 
 #[derive(Clone, Deserialize)]
 #[serde(default, deny_unknown_fields)]
@@ -24,6 +25,7 @@ pub struct Config {
     pub coalesce_ms: u64,
     pub dashboard_dir: Option<PathBuf>,
     pub artifacts_dir: Option<PathBuf>,
+    pub resource_roots: Vec<ResourceRootConfig>,
 }
 impl Default for Config {
     fn default() -> Self {
@@ -40,6 +42,7 @@ impl Default for Config {
             coalesce_ms: 2000,
             dashboard_dir: None,
             artifacts_dir: None,
+            resource_roots: vec![],
         }
     }
 }
@@ -103,6 +106,9 @@ pub struct LaneConfig {
     /// deployment, so it does not replace the frozen execution profile.
     #[serde(default)]
     pub failure_observe: Option<HookConfig>,
+    /// Optional, administrator-defined filesystem admission for this lane.
+    #[serde(default)]
+    pub resource_admission: Option<ResourceAdmissionConfig>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -240,6 +246,11 @@ impl Config {
                 }
             }
         }
+        for root in &mut config.resource_roots {
+            if root.path.is_relative() {
+                root.path = base.join(&root.path);
+            }
+        }
         Ok(config)
     }
     pub fn validate(&self) -> Result<()> {
@@ -293,6 +304,21 @@ impl Config {
             bail!("configured artifacts directory is not a directory");
         }
         let mut lane_ids = std::collections::HashSet::new();
+        let mut resource_root_ids = std::collections::HashSet::new();
+        for root in &self.resource_roots {
+            if crate::resources::validate_resource_id(&root.id).is_err()
+                || root.managed_budget_bytes == 0
+                || !root.path.is_absolute()
+                || !root.path.is_dir()
+            {
+                bail!(
+                    "resource roots need a safe unique id, positive managed budget, and existing absolute directory"
+                );
+            }
+            if !resource_root_ids.insert(&root.id) {
+                bail!("duplicate resource root id: {}", root.id);
+            }
+        }
         for lane in &self.lanes {
             if lane.id.is_empty()
                 || lane.project.is_empty()
@@ -314,6 +340,21 @@ impl Config {
                     "configured repository directory missing for lane {}",
                     lane.id
                 );
+            }
+            if let Some(admission) = &lane.resource_admission {
+                if admission.reservation_bytes == 0 {
+                    bail!(
+                        "resource admission reservation for lane {} must be positive",
+                        lane.id
+                    );
+                }
+                if !resource_root_ids.contains(&admission.root_id) {
+                    bail!(
+                        "lane {} names an unknown resource root: {}",
+                        lane.id,
+                        admission.root_id
+                    );
+                }
             }
             validate_parameter_specs(&lane.request_parameters).map_err(|error| {
                 anyhow::anyhow!("invalid request parameters for lane {}: {error}", lane.id)
@@ -519,6 +560,7 @@ mod tests {
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
             failure_observe: None,
+            resource_admission: None,
         }
     }
 
