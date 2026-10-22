@@ -1,13 +1,11 @@
 use anyhow::{Context, Result, bail};
 use clap::{Parser, Subcommand, ValueEnum};
-use reqwest::{Client, Method};
-use serde::Serialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
-use std::{
-    path::PathBuf,
-    time::{Duration, Instant},
+use shipbraid::client::{
+    Api, ClientFailure as CliFailure, SubmitParams, execute_submit, request_logs_path,
+    run_logs_path, segment, wait_request_status,
 };
+use std::{path::PathBuf, time::Duration};
 
 mod local_cli;
 
@@ -176,6 +174,8 @@ enum Command {
     },
     /// Check process readiness without credentials.
     Health,
+    /// Start the Model Context Protocol (MCP) stdio server.
+    Mcp,
 }
 #[derive(Subcommand)]
 enum LogTarget {
@@ -239,30 +239,6 @@ impl Coverage {
         }
     }
 }
-#[derive(Debug, Serialize)]
-pub(crate) struct CliFailure {
-    code: String,
-    message: String,
-    retryable: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    http_status: Option<u16>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    retry_after_seconds: Option<u64>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    idempotency_key: Option<String>,
-}
-impl CliFailure {
-    pub(crate) fn new(code: &str, message: &str, retryable: bool) -> Self {
-        Self {
-            code: code.into(),
-            message: message.into(),
-            retryable,
-            http_status: None,
-            retry_after_seconds: None,
-            idempotency_key: None,
-        }
-    }
-}
 impl Cli {
     fn validate(&self) -> std::result::Result<(), CliFailure> {
         match &self.command {
@@ -303,12 +279,6 @@ where
     cli.validate().map_err(CliParseError::Validation)?;
     Ok(cli)
 }
-impl std::fmt::Display for CliFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(formatter, "{}: {}", self.code, self.message)
-    }
-}
-impl std::error::Error for CliFailure {}
 
 fn failure_value(error: &anyhow::Error) -> Value {
     match error.downcast_ref::<CliFailure>() {
@@ -323,222 +293,6 @@ fn failure_value(error: &anyhow::Error) -> Value {
     }
 }
 
-struct Api {
-    client: Client,
-    base: reqwest::Url,
-    token: Option<String>,
-}
-impl Api {
-    fn new(url: &str, token: Option<String>) -> Result<Self> {
-        let mut base = reqwest::Url::parse(url).context("invalid server URL")?;
-        if !matches!(base.scheme(), "http" | "https")
-            || base.host_str().is_none()
-            || !base.username().is_empty()
-            || base.password().is_some()
-            || base.query().is_some()
-            || base.fragment().is_some()
-            || (base.scheme() == "http"
-                && !matches!(
-                    base.host_str(),
-                    Some("localhost" | "127.0.0.1" | "[::1]" | "::1")
-                ))
-        {
-            bail!(
-                "server URL must use HTTPS (or loopback HTTP), without credentials, query or fragment"
-            );
-        }
-        base.set_path(&format!("{}/", base.path().trim_end_matches('/')));
-        let client = Client::builder()
-            .timeout(Duration::from_secs(15))
-            .redirect(reqwest::redirect::Policy::none())
-            .build()?;
-        Ok(Self {
-            client,
-            base,
-            token,
-        })
-    }
-    async fn call(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Value>,
-        key: Option<&str>,
-    ) -> Result<Value> {
-        self.call_with_timeout(method, path, body, key, None).await
-    }
-    async fn call_with_timeout(
-        &self,
-        method: Method,
-        path: &str,
-        body: Option<Value>,
-        key: Option<&str>,
-        timeout: Option<Duration>,
-    ) -> Result<Value> {
-        let url = self.base.join(path.trim_start_matches('/'))?;
-        let mut request = self.client.request(method, url);
-        if path.starts_with("/v1/") {
-            let token = self
-                .token
-                .as_deref()
-                .context("set SHIPBRAID_TOKEN or --token")?;
-            request = request.bearer_auth(token);
-        }
-        if let Some(body) = body {
-            request = request.json(&body);
-        }
-        if let Some(key) = key {
-            request = request.header("Idempotency-Key", key);
-        }
-        if let Some(timeout) = timeout {
-            request = request.timeout(timeout);
-        }
-        let response = request.send().await.map_err(|_| CliFailure::new(
-            "transport_error", "The coordinator response was not received. The operation may have been accepted; recover using the original request or idempotency key.", true,
-        ))?;
-        let status = response.status();
-        let retry_after = response
-            .headers()
-            .get("retry-after")
-            .and_then(|value| value.to_str().ok())
-            .and_then(|value| value.parse::<u64>().ok());
-        let value: Value = response.json().await.map_err(|_| {
-            let mut failure = CliFailure::new(
-                "invalid_response", "The coordinator returned an unreadable JSON response. Recover using the original request or idempotency key.", status.is_success() || status.is_server_error() || status.as_u16() == 429,
-            );
-            failure.http_status = Some(status.as_u16());
-            failure.retry_after_seconds = retry_after;
-            failure
-        })?;
-        if !status.is_success() {
-            let code = value
-                .get("code")
-                .and_then(Value::as_str)
-                .filter(|code| {
-                    !code.is_empty()
-                        && code.len() <= 64
-                        && code
-                            .bytes()
-                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
-                })
-                .unwrap_or("http_error");
-            let mut message = value
-                .get("message")
-                .and_then(Value::as_str)
-                .unwrap_or("The coordinator rejected the operation.")
-                .to_owned();
-            if let Some(token) = self.token.as_deref().filter(|token| !token.is_empty()) {
-                message = message.replace(token, "[redacted]");
-            }
-            message = message.replace(self.base.as_str(), "[coordinator]");
-            message = message
-                .chars()
-                .filter(|c| !c.is_control())
-                .take(2048)
-                .collect();
-            let mut failure = CliFailure::new(
-                code,
-                &message,
-                value
-                    .get("retryable")
-                    .and_then(Value::as_bool)
-                    .unwrap_or(status.is_server_error() || status.as_u16() == 429),
-            );
-            failure.http_status = Some(status.as_u16());
-            failure.retry_after_seconds = retry_after;
-            return Err(failure.into());
-        }
-        Ok(value)
-    }
-    async fn get(&self, path: &str) -> Result<Value> {
-        self.call(Method::GET, path, None, None).await
-    }
-    async fn post(&self, path: &str, body: Value) -> Result<Value> {
-        self.call(Method::POST, path, Some(body), None).await
-    }
-}
-
-async fn canonical_task_intent(api: &Api, body: &Value) -> Result<Value> {
-    let mut intent = body.clone();
-    if intent.get("lane_id").is_none() {
-        let mut url = api.base.join("v1/lanes")?;
-        {
-            let mut query = url.query_pairs_mut();
-            query.append_pair(
-                "project",
-                body["project"].as_str().context("project is required")?,
-            );
-            query.append_pair(
-                "environment",
-                body["environment"]
-                    .as_str()
-                    .context("environment is required")?,
-            );
-        }
-        let path = format!("/v1/lanes?{}", url.query().unwrap_or_default());
-        let lanes = api.get(&path).await?;
-        let items = lanes
-            .get("items")
-            .and_then(Value::as_array)
-            .filter(|items| items.len() == 1)
-            .context("target must resolve to one authorized lane")?;
-        let id = items[0]
-            .get("id")
-            .and_then(Value::as_str)
-            .context("lane has no identity")?;
-        intent["lane_id"] = json!(id);
-    }
-    if let Some(object) = intent.as_object_mut() {
-        object.remove("project");
-        object.remove("environment");
-    }
-    Ok(intent)
-}
-
-fn task_idempotency_key(body: &Value) -> String {
-    let mut intent = body.clone();
-    if let Some(object) = intent.as_object_mut() {
-        object.remove("session_id");
-    }
-    format!(
-        "task-{}",
-        hex::encode(Sha256::digest(
-            serde_json::to_vec(&intent).expect("JSON intent is serializable")
-        ))
-    )
-}
-fn segment(value: &str) -> Result<&str> {
-    if value.is_empty()
-        || !value
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_')
-    {
-        bail!("invalid resource identifier");
-    }
-    Ok(value)
-}
-fn run_logs_path(run_id: &str, after: u64) -> Result<String> {
-    Ok(format!(
-        "/v1/runs/{}/logs?after={after}&limit=200",
-        segment(run_id)?
-    ))
-}
-fn request_logs_path(
-    base: &reqwest::Url,
-    request_id: &str,
-    cursor: Option<&str>,
-) -> Result<String> {
-    let path = format!("/v1/requests/{}/logs", segment(request_id)?);
-    let mut url = base.join(path.trim_start_matches('/'))?;
-    {
-        let mut query = url.query_pairs_mut();
-        query.append_pair("limit", "200");
-        if let Some(cursor) = cursor {
-            query.append_pair("cursor", cursor);
-        }
-    }
-    Ok(format!("{path}?{}", url.query().unwrap_or_default()))
-}
 pub(crate) fn output(value: &Value) -> Result<()> {
     println!("{}", serde_json::to_string_pretty(value)?);
     Ok(())
@@ -630,8 +384,13 @@ async fn run(cli: Cli) -> Result<u8> {
         None => cli.token,
     };
     let api = Api::new(&cli.url, token)?;
+    if let Command::Mcp = &cli.command {
+        return shipbraid::mcp::run_stdio(api).await;
+    }
     let value = match cli.command {
-        Command::Serve { .. } | Command::Doctor { .. } | Command::Run(_) => unreachable!(),
+        Command::Serve { .. } | Command::Doctor { .. } | Command::Run(_) | Command::Mcp => {
+            unreachable!()
+        }
         Command::Submit {
             lane,
             project,
@@ -645,30 +404,9 @@ async fn run(cli: Cli) -> Result<u8> {
             idempotency_key,
             task_id,
             session_id,
-            mut collaborators,
+            collaborators,
             parameters,
         } => {
-            let mut components = components;
-            components.sort();
-            components.dedup();
-            collaborators.sort();
-            collaborators.dedup();
-            let deadline = deadline
-                .map(|value| {
-                    chrono::DateTime::parse_from_rfc3339(&value).map(|time| {
-                        time.with_timezone(&chrono::Utc)
-                            .to_rfc3339_opts(chrono::SecondsFormat::AutoSi, true)
-                    })
-                })
-                .transpose()
-                .map_err(|_| {
-                    CliFailure::new(
-                        "invalid_deadline",
-                        "deadline must be a valid RFC3339 timestamp.",
-                        false,
-                    )
-                })?;
-            let mut body = json!({"revision":revision,"components":components,"coverage_mode":coverage.as_str(),"priority":priority.as_str(),"deadline_at":deadline,"reason":reason});
             let mut frozen_parameters = std::collections::BTreeMap::new();
             for parameter in parameters {
                 let (key, value) = parameter.split_once('=').ok_or_else(|| {
@@ -688,50 +426,32 @@ async fn run(cli: Cli) -> Result<u8> {
                     .into());
                 }
             }
-            if !frozen_parameters.is_empty() {
-                body["parameters"] = json!(frozen_parameters);
-            }
-            if let Some(task_id) = &task_id {
-                body["task_id"] = json!(task_id);
-            }
-            if let Some(session_id) = session_id {
-                body["session_id"] = json!(session_id);
-            }
-            if !collaborators.is_empty() {
-                body["collaborators"] = json!(collaborators);
-            }
-            if let Some(lane) = lane {
-                body["lane_id"] = lane.into();
-            } else {
-                body["project"] = project.context("project is required without lane")?.into();
-                body["environment"] = environment
-                    .context("environment is required without lane")?
-                    .into();
-            }
-            let key = if let Some(key) = idempotency_key {
-                key
-            } else if task_id.is_some() {
-                task_idempotency_key(&canonical_task_intent(&api, &body).await?)
-            } else {
-                uuid::Uuid::new_v4().to_string()
-            };
+            let (result, key) = execute_submit(
+                &api,
+                SubmitParams {
+                    lane_id: lane,
+                    project,
+                    environment,
+                    revision,
+                    components,
+                    coverage: Some(coverage.as_str().to_owned()),
+                    priority: Some(priority.as_str().to_owned()),
+                    deadline_at: deadline,
+                    reason: Some(reason),
+                    idempotency_key,
+                    task_id,
+                    session_id,
+                    collaborators,
+                    parameters: if frozen_parameters.is_empty() {
+                        None
+                    } else {
+                        Some(frozen_parameters)
+                    },
+                },
+            )
+            .await?;
             if !cli.json {
                 eprintln!("idempotency-key: {key}");
-            }
-            let mut result = match api
-                .call(Method::POST, "/v1/requests", Some(body), Some(&key))
-                .await
-            {
-                Ok(value) => value,
-                Err(mut error) => {
-                    if let Some(failure) = error.downcast_mut::<CliFailure>() {
-                        failure.idempotency_key = Some(key);
-                    }
-                    return Err(error);
-                }
-            };
-            if let Some(object) = result.as_object_mut() {
-                object.insert("idempotency_key".into(), json!(key));
             }
             result
         }
@@ -743,75 +463,28 @@ async fn run(cli: Cli) -> Result<u8> {
             if poll_ms == 0 {
                 bail!("poll-ms must be positive");
             }
-            let path = format!("/v1/requests/{}", segment(&request_id)?);
-            let started = Instant::now();
-            let budget = Duration::from_secs(timeout_seconds);
-            let mut last_observation = None;
-            let mut failures = 0u32;
-            loop {
-                let remaining = budget.saturating_sub(started.elapsed());
-                // A zero-second wait still performs one bounded observation.
-                let query_timeout = remaining
-                    .min(Duration::from_secs(15))
-                    .max(Duration::from_millis(100));
-                match api
-                    .call_with_timeout(Method::GET, &path, None, None, Some(query_timeout))
-                    .await
-                {
-                    Ok(value) => {
-                        failures = 0;
-                        let code = match value.get("status").and_then(Value::as_str) {
-                            Some("satisfied") => Some(0),
-                            Some("needs_attention") => Some(2),
-                            Some("expired") => Some(3),
-                            Some("withdrawn") => Some(4),
-                            _ => None,
-                        };
-                        if let Some(code) = code {
-                            output(&value)?;
-                            return Ok(code);
-                        }
-                        last_observation = Some(value);
-                    }
-                    Err(error) => {
-                        if !error
-                            .downcast_ref::<CliFailure>()
-                            .is_some_and(|failure| failure.retryable)
-                        {
-                            return Err(error);
-                        }
-                        failures = failures.saturating_add(1);
-                        let failure = error
-                            .downcast_ref::<CliFailure>()
-                            .expect("checked structured failure");
-                        let backoff = Duration::from_millis(poll_ms.max(100))
-                            .saturating_mul(1u32 << failures.min(5))
-                            .min(Duration::from_secs(5))
-                            .max(Duration::from_secs(
-                                failure.retry_after_seconds.unwrap_or_default(),
-                            ));
-                        let remaining = budget.saturating_sub(started.elapsed());
-                        if !remaining.is_zero() {
-                            tokio::time::sleep(backoff.min(remaining)).await;
-                        }
-                    }
+            let outcome = wait_request_status(
+                &api,
+                &request_id,
+                Duration::from_secs(timeout_seconds),
+                Duration::from_millis(poll_ms),
+            )
+            .await?;
+            output(&outcome.value)?;
+            if outcome.is_timeout {
+                if !cli.json {
+                    eprintln!("local wait timeout; server request remains active");
                 }
-                let remaining = budget.saturating_sub(started.elapsed());
-                if remaining.is_zero() {
-                    let mut value = last_observation.unwrap_or_else(
-                        || json!({"request_id": request_id, "observation_available": false}),
-                    );
-                    value["local_wait_timeout"] = json!(true);
-                    output(&value)?;
-                    if !cli.json {
-                        eprintln!("local wait timeout; server request remains active");
-                    }
-                    return Ok(124);
-                }
-                if failures == 0 {
-                    tokio::time::sleep(Duration::from_millis(poll_ms).min(remaining)).await;
-                }
+                return Ok(124);
             }
+            let code = match outcome.value.get("status").and_then(Value::as_str) {
+                Some("satisfied") => 0,
+                Some("needs_attention") => 2,
+                Some("expired") => 3,
+                Some("withdrawn") => 4,
+                _ => 0,
+            };
+            return Ok(code);
         }
 
         Command::Inspect { kind, id } => {
@@ -956,12 +629,29 @@ async fn run(cli: Cli) -> Result<u8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use shipbraid::client::task_idempotency_key;
     #[test]
     fn cli_resource_identifiers_cannot_change_route() {
         assert!(segment("../drain").is_err());
         assert!(segment("lane?scope=all").is_err());
         assert!(segment("demo-test").is_ok());
     }
+    #[test]
+    fn mcp_subcommand_parses_with_global_options() {
+        let cli = parse_cli([
+            "shipbraid",
+            "--url",
+            "https://shipbraid.example.com",
+            "--token",
+            "test-token",
+            "mcp",
+        ])
+        .unwrap();
+        assert!(matches!(cli.command, Command::Mcp));
+        assert_eq!(cli.url, "https://shipbraid.example.com");
+        assert_eq!(cli.token.as_deref(), Some("test-token"));
+    }
+
     #[test]
     fn submit_requires_one_unambiguous_environment_selector() {
         let base = [

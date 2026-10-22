@@ -196,6 +196,7 @@ shipbraid --version
 | `resolve-unknown` | 依据独立执行器证据核对 unknown | admin 及对应 lane 权限 |
 | `unpause` | 显式清除 lane 的 failure_paused 标记 | admin 及对应 lane 权限 |
 | `health` | 检查 `/ready` | 无需 token |
+| `mcp` | 启动标准输入输出的 Model Context Protocol (MCP) 服务 | 复用全局 API 配置与 token 权限范围 |
 
 `system` 中主体的能力不代表可操作所有请求；服务端对每次写操作重新检查 lane、主体和请求状态。
 
@@ -332,8 +333,61 @@ shipbraid health
 | 4 | wait 观察到请求已撤回 |
 | 124 | 客户端本地 wait 超时，服务端请求仍然存在 |
 
+## MCP 服务
+
+`shipbraid mcp` 子命令提供基于标准输入输出（stdio）的 JSON-RPC 2.0 [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) 服务。它把现有的 HTTP API 安全子集作为结构化工具直接暴露给 Agent 宿主（例如 Claude Code、Codex、ZCode 等），使宿主无需拼接 shell 命令即可调用协调器，同时原生复用任务级确定性幂等键推导、本地有界等待和结构化错误透传。
+
+### 宿主配置示例
+
+`shipbraid mcp` 复用全局选项与环境变量（`SHIPBRAID_URL`、`SHIPBRAID_TOKEN` 或 `SHIPBRAID_TOKEN_FILE`），无需额外参数或独立配置文件：
+
+```json
+{
+  "mcpServers": {
+    "shipbraid": {
+      "command": "shipbraid",
+      "args": ["mcp"],
+      "env": {
+        "SHIPBRAID_URL": "https://shipbraid.example.com",
+        "SHIPBRAID_TOKEN_FILE": "/home/agent/.config/shipbraid/my-project.token"
+      }
+    }
+  }
+}
+```
+
+服务握手支持协议版本 `2025-06-18` 与 `2024-11-05`，自动与客户端协商。诊断信息与日志仅输出到 stderr，stdout 完全保留给换行分隔的 JSON-RPC 消息。
+
+### 工具清单与管理操作边界
+
+MCP 工具面严格暴露 14 个 Agent 安全工具，全部使用 snake_case 命名。管理操作（`drain`、`resume`、`unpause`、`resolve-unknown`、`resources`）**一律不提供**，即使所配 token 具有 admin 能力：
+
+| 工具名 | 类型 | 说明与输入约束 |
+| --- | --- | --- |
+| `system` | 只读 | 查看认证主体、租户、版本与 API 能力 |
+| `list_lanes` | 只读 | 列出当前 token 可访问的所有通道 |
+| `inspect_lane` | 只读 | 查询单个通道详情（必填 `lane_id`） |
+| `get_release_guide` | 只读 | 查询发布指引：传 `lane_id` 查通道指引，或传 `project` 查项目聚合指引（二者互斥） |
+| `get_request` | 只读 | 查询发布请求详情（必填 `request_id`） |
+| `list_requests` | 只读 | 列出发布请求（支持 `task_id`、`principal`、`status`、`lane_id`、`cursor`、`limit` 过滤） |
+| `get_run` | 只读 | 查询执行 run 详情（必填 `run_id`） |
+| `get_events` | 只读 | 查询通道审计事件（必填 `lane_id`，可选游标 `after`） |
+| `get_logs` | 只读 | 查询执行日志：固定 run 模式（`run_id` 与可选 `after`）或当前 run 模式（`request_id` 与可选 `cursor`） |
+| `submit_request` | 写操作 | 提交不可变发布请求（`lane_id` 或 `project`+`environment`、`revision`、`components`、`coverage`、`priority`、`deadline_at`、`reason`、`task_id`、`session_id`、`collaborators`、`parameters`） |
+| `wait_request` | 写操作 | 本地有界轮询等待请求终态（必填 `request_id`，可选 `timeout_seconds` 最大 600 秒默认 300，可选 `poll_seconds` 默认 0.5） |
+| `withdraw_request` | 写操作 | 撤回等待中的发布请求（必填 `request_id`） |
+| `retry_request` | 写操作 | 重试处于 `needs_attention` 状态的请求（必填 `request_id`；unknown 不解锁） |
+| `raise_priority` | 写操作 | 提升请求优先级（必填 `request_id`、`priority: "urgent"`、可选 `reason`；需 urgent/admin 能力） |
+
+### 恢复语义与核心不变量
+
+1. **确定性幂等键推导**：`submit_request` 携带 `task_id` 时，完全复用 CLI submit 既有的规范化与 SHA-256 任务确定键推导逻辑；保持相同提交意图，Agent 跨会话重放可安全恢复原请求。无 `task_id` 时生成随机 UUID 并在结果 JSON 中回显 `idempotency_key`。
+2. **本地等待超时≠撤回**：`wait_request` 在达到终态（`satisfied`、`needs_attention`、`expired`、`withdrawn`）或超时时返回请求快照。本地等待超时附带 `"local_wait_timeout": true`，服务端请求依然处于排队或活跃状态，不会被取消或撤回。
+3. **环境验收不变量**：HTTP 202 或提交成功仅代表发布请求已受理，不代表发布完成；发布成功以请求进入 `satisfied` 且 receipt 匹配本次版本与组件为准。`unknown` 状态不会解锁部署所有权，也不可通过 retry 绕过。
+4. **结构化错误透传**：调用出错或参数非法时返回 `isError: true`，text 为包含 `code`、`message`、`retryable` 的结构化 JSON（未知工具返回 `code: "unknown_tool"`），不依赖自然语言解析。
+
 ## 验证与边界
 
 运行 `python3 scripts/acceptance-agents.py` 可验证三个独立 Agent 身份共享模拟执行、协作权限、重启恢复与机器错误。全部使用临时仓库、数据库和凭据，`real_deployments=0`。
 
-本轮未实现 MCP、SDK、动态租户、SSE、当前环境新鲜证据复用、真实安全抢占或生产接入；旧性能目标与完整故障矩阵继续由原计划追踪。
+本轮未实现 SDK、动态租户、SSE、当前环境新鲜证据复用、真实安全抢占或生产接入；旧性能目标与完整故障矩阵继续由原计划追踪。

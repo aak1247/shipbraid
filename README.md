@@ -91,7 +91,7 @@ The same service serves the dashboard at `http://127.0.0.1:8787` by default. Ent
 
 ## For agents
 
-Use [the Agent guide](docs/agents.md) for mode selection, project prerequisites, target discovery, identity setup, the CLI reference, task recovery, structured errors, and collaboration permissions. Local mode has one same-user trust boundary and one project per ledger. A shared server fixes the tenant to `local`; maintainers register repositories and lanes, then record the team's service URL, lane, components, and publishing steps in the project's `AGENTS.md` using the [project integration guide](docs/project-integration.md).
+Use [the Agent guide](docs/agents.md) for mode selection, project prerequisites, target discovery, identity setup, the CLI reference, task recovery, structured errors, collaboration permissions, and the Model Context Protocol (MCP) server. Standard I/O MCP mode (`shipbraid mcp`) exposes 14 agent-safe release coordination tools (e.g. `submit_request`, `wait_request`, `get_release_guide`) with deterministic task idempotency and bounded wait polling directly to MCP hosts without shell quoting. Administrative operations remain strictly outside the MCP tool surface. Local mode has one same-user trust boundary and one project per ledger. A shared server fixes the tenant to `local`; maintainers register repositories and lanes, then record the team's service URL, lane, components, and publishing steps in the project's `AGENTS.md` using the [project integration guide](docs/project-integration.md).
 
 ## Connect an executor
 

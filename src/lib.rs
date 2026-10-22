@@ -1,4 +1,5 @@
 pub mod api;
+pub mod client;
 pub mod config;
 pub mod diagnostics;
 pub mod domain;
@@ -7,6 +8,7 @@ pub mod executor;
 pub mod hooks;
 pub mod lineage;
 pub mod local;
+pub mod mcp;
 pub mod resources;
 pub mod service;
 pub mod store;

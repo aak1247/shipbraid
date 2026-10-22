@@ -91,7 +91,7 @@ Dashboard 由同一服务提供，默认打开 `http://127.0.0.1:8787`，输入�
 
 ## Agent 使用
 
-[Agent 使用指南](docs/agents.md)说明模式选择、项目接入前提、目标发现、身份配置、CLI 命令参考、任务恢复、结构化错误和协作权限。本机模式使用同用户信任边界，并且每个账本只管理一个项目。共享 server 当前将租户固定为 `local`；维护者先按[项目接入指南](docs/project-integration.md)注册仓库和 lane，再把服务地址、lane、组件和发布步骤写入项目的 `AGENTS.md`。
+[Agent 使用指南](docs/agents.md)说明模式选择、项目接入前提、目标发现、身份配置、CLI 命令参考、任务恢复、结构化错误、协作权限与 Model Context Protocol (MCP) 服务。`shipbraid mcp` 提供标准输入输出的 JSON-RPC 2.0 MCP 工具服务，把 14 个 Agent 安全的发布协调工具（如 `submit_request`、`wait_request`、`get_release_guide` 等）直接开放给 MCP 宿主（如 Claude Code、Codex、ZCode），原生复用任务确定性幂等键推导与本地有界轮询等待，且管理操作一律不进工具面。本机模式使用同用户信任边界，并且每个账本只管理一个项目。共享 server 当前将租户固定为 `local`；维护者先按[项目接入指南](docs/project-integration.md)注册仓库和 lane，再把服务地址、lane、组件和发布步骤写入项目的 `AGENTS.md`。
 
 ## 接入执行器
 
