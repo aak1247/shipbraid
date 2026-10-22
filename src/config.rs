@@ -109,6 +109,36 @@ pub struct LaneConfig {
     /// Optional, administrator-defined filesystem admission for this lane.
     #[serde(default)]
     pub resource_admission: Option<ResourceAdmissionConfig>,
+    /// Optional natural-language release guide for this lane.
+    #[serde(default)]
+    pub guide: Option<GuideConfig>,
+}
+
+pub const MAX_GUIDE_FILE_BYTES: usize = 32768;
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct GuideConfig {
+    #[serde(default)]
+    pub project: Option<PathBuf>,
+    #[serde(default)]
+    pub environment: Option<PathBuf>,
+    #[serde(default)]
+    pub components: BTreeMap<String, PathBuf>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct GuideDocument {
+    pub path: PathBuf,
+    pub content_sha256: String,
+    pub content: String,
+}
+
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct LaneGuideSnapshot {
+    pub project: Option<GuideDocument>,
+    pub environment: Option<GuideDocument>,
+    pub components: BTreeMap<String, GuideDocument>,
 }
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
@@ -211,6 +241,17 @@ impl Config {
         for lane in &mut config.lanes {
             if lane.repository_path.is_relative() {
                 lane.repository_path = base.join(&lane.repository_path);
+            }
+            if let Some(guide) = &mut lane.guide {
+                if let Some(project) = &mut guide.project {
+                    resolve_path(base, project);
+                }
+                if let Some(environment) = &mut guide.environment {
+                    resolve_path(base, environment);
+                }
+                for path in guide.components.values_mut() {
+                    resolve_path(base, path);
+                }
             }
             if let LaneExecutorConfig::Hooks {
                 dispatch,
@@ -377,6 +418,9 @@ impl Config {
                     validate_hook(&lane.id, name, hook)?;
                 }
             }
+            if let Some(guide) = &lane.guide {
+                guide.load_snapshot(&lane.id, &lane.components)?;
+            }
         }
         let mut token_ids = std::collections::HashSet::new();
         for token in &self.tokens {
@@ -447,6 +491,19 @@ impl Config {
             digest.update(schema);
         }
         Ok(hex::encode(digest.finalize()))
+    }
+
+    pub fn load_guides(&self) -> Result<BTreeMap<String, LaneGuideSnapshot>> {
+        let mut snapshots = BTreeMap::new();
+        for lane in &self.lanes {
+            if let Some(guide) = &lane.guide {
+                snapshots.insert(
+                    lane.id.clone(),
+                    guide.load_snapshot(&lane.id, &lane.components)?,
+                );
+            }
+        }
+        Ok(snapshots)
     }
 }
 
@@ -540,6 +597,170 @@ fn validate_hook_args(lane: &str, operation: &str, args: &[String]) -> Result<()
     Ok(())
 }
 
+impl GuideConfig {
+    pub fn load_snapshot(
+        &self,
+        lane_id: &str,
+        lane_components: &[String],
+    ) -> Result<LaneGuideSnapshot> {
+        for component in self.components.keys() {
+            if !lane_components.contains(component) {
+                bail!("guide component '{component}' is not declared in lane '{lane_id}'");
+            }
+        }
+        let project = self
+            .project
+            .as_deref()
+            .map(|path| load_guide_document(lane_id, "project", path))
+            .transpose()?;
+        let environment = self
+            .environment
+            .as_deref()
+            .map(|path| load_guide_document(lane_id, "environment", path))
+            .transpose()?;
+        let mut components = BTreeMap::new();
+        for (name, path) in &self.components {
+            components.insert(name.clone(), load_guide_document(lane_id, name, path)?);
+        }
+        Ok(LaneGuideSnapshot {
+            project,
+            environment,
+            components,
+        })
+    }
+}
+
+fn load_guide_document(lane_id: &str, label: &str, path: &Path) -> Result<GuideDocument> {
+    if !path.is_file() {
+        bail!(
+            "lane '{lane_id}' {label} guide file '{}' does not exist or is not a regular file",
+            path.display()
+        );
+    }
+    let metadata = path
+        .metadata()
+        .with_context(|| format!("cannot read metadata of guide file '{}'", path.display()))?;
+    if metadata.len() > MAX_GUIDE_FILE_BYTES as u64 {
+        bail!(
+            "lane '{lane_id}' {label} guide file '{}' exceeds maximum allowed size of {} bytes",
+            path.display(),
+            MAX_GUIDE_FILE_BYTES
+        );
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read guide file '{}'", path.display()))?;
+    if let Some(pattern) = scan_secret(&content) {
+        bail!(
+            "lane '{lane_id}' {label} guide file '{}' contains prohibited secret pattern ({pattern})",
+            path.display()
+        );
+    }
+    let content_sha256 = hex::encode(Sha256::digest(content.as_bytes()));
+    Ok(GuideDocument {
+        path: path.to_path_buf(),
+        content_sha256,
+        content,
+    })
+}
+
+const TOKEN_PREFIXES: &[&str] = &[
+    "ghp_",
+    "gho_",
+    "ghu_",
+    "ghs_",
+    "github_pat_",
+    "glpat-",
+    "xoxb-",
+    "xoxp-",
+    "xoxa-",
+    "xoxr-",
+    "xoxs-",
+    "sk-ant-",
+];
+
+pub fn scan_secret(content: &str) -> Option<&'static str> {
+    if has_pem_private_key(content) {
+        return Some("PEM private key");
+    }
+    if has_aws_access_key(content) {
+        return Some("AWS access key ID");
+    }
+    if has_google_api_key(content) {
+        return Some("Google API key");
+    }
+    for prefix in TOKEN_PREFIXES {
+        if has_token_prefix(content, prefix) {
+            return Some("prohibited token credential");
+        }
+    }
+    None
+}
+
+fn has_pem_private_key(text: &str) -> bool {
+    for line in text.lines() {
+        let trimmed = line.trim();
+        if let Some(idx) = trimmed.find("-----BEGIN ") {
+            let rest = &trimmed[idx + "-----BEGIN ".len()..];
+            if rest.contains("PRIVATE KEY-----") {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_aws_access_key(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 20 {
+        return false;
+    }
+    for i in 0..=bytes.len() - 20 {
+        if &bytes[i..i + 4] == b"AKIA" {
+            let tail = &bytes[i + 4..i + 20];
+            if tail
+                .iter()
+                .all(|b| b.is_ascii_digit() || b.is_ascii_uppercase())
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_google_api_key(text: &str) -> bool {
+    let bytes = text.as_bytes();
+    if bytes.len() < 39 {
+        return false;
+    }
+    for i in 0..=bytes.len() - 39 {
+        if &bytes[i..i + 4] == b"AIza" {
+            let tail = &bytes[i + 4..i + 39];
+            if tail
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || *b == b'_' || *b == b'-')
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn has_token_prefix(text: &str, prefix: &str) -> bool {
+    let mut offset = 0;
+    while let Some(pos) = text[offset..].find(prefix) {
+        let abs_pos = offset + pos;
+        let suffix = &text[abs_pos + prefix.len()..];
+        let non_ws_count = suffix.chars().take_while(|c| !c.is_whitespace()).count();
+        if non_ws_count >= 16 {
+            return true;
+        }
+        offset = abs_pos + prefix.len();
+    }
+    false
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -561,6 +782,7 @@ mod tests {
             executor: LaneExecutorConfig::Scripted,
             failure_observe: None,
             resource_admission: None,
+            guide: None,
         }
     }
 
@@ -810,5 +1032,517 @@ mod tests {
             timeout_ms: 1_000,
         };
         assert_ne!(first, config.effective_profile_digest(&lane).unwrap());
+    }
+
+    #[test]
+    fn secret_scanner_detects_prohibited_patterns_and_ignores_benign_content() {
+        // Benign content
+        assert_eq!(
+            scan_secret("# Deployment Guide\nDeploy with `cargo run`.\n"),
+            None
+        );
+        assert_eq!(scan_secret("-----BEGIN CERTIFICATE-----\nMIIB..."), None);
+        assert_eq!(scan_secret("-----BEGIN PUBLIC KEY-----\nMIIB..."), None);
+        assert_eq!(scan_secret("AKIA12345"), None); // Too short
+        assert_eq!(scan_secret("AKIA1234567890abcdef"), None); // Lowercase
+        assert_eq!(scan_secret("AIzaSyD-1234"), None); // Too short
+        assert_eq!(scan_secret("ghp_short"), None); // < 16 non-whitespace
+
+        // PEM private keys
+        assert_eq!(
+            scan_secret("-----BEGIN RSA PRIVATE KEY-----\nMIIE..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN EC PRIVATE KEY-----\nMHQC..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blb..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN PRIVATE KEY-----\nMIIE..."),
+            Some("PEM private key")
+        );
+
+        // AWS key
+        assert_eq!(
+            scan_secret("Set AWS_KEY=AKIAIOSFODNN7EXAMPLE in your env"),
+            Some("AWS access key ID")
+        );
+
+        // Google API key
+        assert_eq!(
+            scan_secret("key: AIzaSyD-1234567890abcdef_ABCDEF12345678"),
+            Some("Google API key")
+        );
+
+        // Token prefixes with >= 16 non-whitespace
+        assert_eq!(
+            scan_secret("token: ghp_1234567890123456"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: gho_1234567890123456"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: ghu_1234567890123456"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: ghs_1234567890123456"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: github_pat_11AAAAAAA0123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: glpat-1234567890abcdef"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: xoxb-123456789012-123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: xoxp-123456789012-123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: xoxa-123456789012-123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: xoxr-123456789012-123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: xoxs-123456789012-123456789012"),
+            Some("prohibited token credential")
+        );
+        assert_eq!(
+            scan_secret("token: sk-ant-api03-abcdefghijklmnop"),
+            Some("prohibited token credential")
+        );
+    }
+
+    #[test]
+    fn guide_validation_and_loading_handles_sizes_secrets_and_subsets() {
+        let temp = tempfile::tempdir().unwrap();
+        let overview = temp.path().join("overview.md");
+        let dev = temp.path().join("dev.md");
+        let app = temp.path().join("app.md");
+        std::fs::write(&overview, "# Overview").unwrap();
+        std::fs::write(&dev, "# Dev Environment").unwrap();
+        std::fs::write(&app, "# App Component").unwrap();
+
+        let mut guide = GuideConfig {
+            project: Some(overview.clone()),
+            environment: Some(dev.clone()),
+            components: BTreeMap::from([("app".into(), app.clone())]),
+        };
+
+        // Success case
+        let snapshot = guide.load_snapshot("lane-1", &["app".into()]).unwrap();
+        assert!(snapshot.project.is_some());
+        assert_eq!(snapshot.project.unwrap().content, "# Overview");
+        assert!(snapshot.environment.is_some());
+        assert_eq!(snapshot.environment.unwrap().content, "# Dev Environment");
+        assert_eq!(snapshot.components["app"].content, "# App Component");
+
+        // Component not in lane.components
+        assert!(guide.load_snapshot("lane-1", &["worker".into()]).is_err());
+
+        // File does not exist
+        let missing = temp.path().join("missing.md");
+        guide.project = Some(missing);
+        assert!(guide.load_snapshot("lane-1", &["app".into()]).is_err());
+        guide.project = Some(overview.clone());
+
+        // Oversized file (> 32768 bytes)
+        let large = temp.path().join("large.md");
+        std::fs::write(&large, vec![b'a'; MAX_GUIDE_FILE_BYTES + 1]).unwrap();
+        guide.project = Some(large);
+        assert!(guide.load_snapshot("lane-1", &["app".into()]).is_err());
+        guide.project = Some(overview.clone());
+
+        // Boundary size (exactly 32768 bytes)
+        let boundary = temp.path().join("boundary.md");
+        std::fs::write(&boundary, vec![b'b'; MAX_GUIDE_FILE_BYTES]).unwrap();
+        guide.project = Some(boundary);
+        assert!(guide.load_snapshot("lane-1", &["app".into()]).is_ok());
+        guide.project = Some(overview.clone());
+
+        // Secret scan hit rejects loading
+        let secret_file = temp.path().join("secret.md");
+        std::fs::write(&secret_file, "key: AKIAIOSFODNN7EXAMPLE").unwrap();
+        guide.project = Some(secret_file);
+        assert!(guide.load_snapshot("lane-1", &["app".into()]).is_err());
+    }
+
+    #[test]
+    fn effective_profile_digest_is_invariant_under_guide_configuration() {
+        let temp = tempfile::tempdir().unwrap();
+        let overview = temp.path().join("overview.md");
+        std::fs::write(&overview, "# Overview").unwrap();
+
+        let lane_without_guide = LaneConfig {
+            id: "test".into(),
+            project: "p".into(),
+            environment: "dev".into(),
+            repository_id: "r".into(),
+            repository_path: temp.path().to_path_buf(),
+            release_ref: "refs/heads/main".into(),
+            profile_digest: "base".into(),
+            components: vec!["app".into()],
+            request_parameters: BTreeMap::new(),
+            allow_descendant: false,
+            allow_preemption: false,
+            enabled: true,
+            executor: LaneExecutorConfig::Scripted,
+            failure_observe: None,
+            resource_admission: None,
+            guide: None,
+        };
+
+        let mut lane_with_guide = lane_without_guide.clone();
+        lane_with_guide.guide = Some(GuideConfig {
+            project: Some(overview),
+            environment: None,
+            components: BTreeMap::new(),
+        });
+
+        let config = Config::default();
+        let digest_without = config
+            .effective_profile_digest(&lane_without_guide)
+            .unwrap();
+        let digest_with = config.effective_profile_digest(&lane_with_guide).unwrap();
+        assert_eq!(
+            digest_without, digest_with,
+            "effective_profile_digest must not change when guide is configured"
+        );
+    }
+
+    #[test]
+    fn secret_scanner_fixed_patterns_and_negative_cases() {
+        // PEM variants
+        assert_eq!(
+            scan_secret("-----BEGIN RSA PRIVATE KEY-----\nMIIE..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN EC PRIVATE KEY-----\nMHQC..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN OPENSSH PRIVATE KEY-----\nb3Blb..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN DSA PRIVATE KEY-----\nMIIB..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN ENCRYPTED PRIVATE KEY-----\nMIIB..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN PRIVATE KEY-----\nMIIE..."),
+            Some("PEM private key")
+        );
+        assert_eq!(
+            scan_secret("-----BEGIN /* comment */ PRIVATE KEY-----"),
+            Some("PEM private key")
+        );
+
+        // Negative PEM cases
+        assert_eq!(
+            scan_secret("-----BEGIN CERTIFICATE REQUEST-----\nMIIB..."),
+            None
+        );
+        assert_eq!(scan_secret("-----BEGIN PUBLIC KEY-----\nMIIB..."), None);
+        assert_eq!(scan_secret("-----BEGIN CERTIFICATE-----\nMIIB..."), None);
+
+        // AWS Key positive and negatives
+        assert_eq!(
+            scan_secret("AKIAIOSFODNN7EXAMPLE"),
+            Some("AWS access key ID")
+        );
+        assert_eq!(
+            scan_secret("export AWS_ACCESS_KEY_ID=AKIA1234567890ABCDEF"),
+            Some("AWS access key ID")
+        );
+        assert_eq!(scan_secret("AKIA1234567890ABCDE"), None); // 15 chars (short)
+        assert_eq!(scan_secret("AKIA1234567890abcdef"), None); // Lowercase
+        assert_eq!(scan_secret("AKIA123456789012345-"), None); // Hyphen
+
+        // Google API Key positive and negatives
+        assert_eq!(
+            scan_secret("AIzaSyD-1234567890abcdef_ABCDEF12345678"),
+            Some("Google API key")
+        );
+        assert_eq!(
+            scan_secret("AIza1234567890123456789012345678901234"),
+            None // 34 chars (short)
+        );
+        assert_eq!(
+            scan_secret("AIza1234567890123456789012345678901234!"),
+            None // Invalid symbol
+        );
+
+        // Token prefix exact boundaries (16 chars hit, 15 chars pass)
+        let prefixes = [
+            "ghp_",
+            "gho_",
+            "ghu_",
+            "ghs_",
+            "github_pat_",
+            "glpat-",
+            "xoxb-",
+            "xoxp-",
+            "xoxa-",
+            "xoxr-",
+            "xoxs-",
+            "sk-ant-",
+        ];
+        for prefix in prefixes {
+            let hit_str = format!("{prefix}0123456789abcdef"); // 16 chars
+            assert_eq!(
+                scan_secret(&hit_str),
+                Some("prohibited token credential"),
+                "expected prefix '{prefix}' with 16 chars to hit"
+            );
+
+            let pass_str = format!("{prefix}0123456789abcde"); // 15 chars
+            assert_eq!(
+                scan_secret(&pass_str),
+                None,
+                "expected prefix '{prefix}' with 15 chars not to hit"
+            );
+        }
+
+        // Benign markdown constructs
+        assert_eq!(
+            scan_secret("Latest commit: 7b06621d0ab234567890abcdef1234567890abcd by test"),
+            None
+        );
+        assert_eq!(
+            scan_secret("[PR link](https://github.com/aak1247/shipbraid/pull/1234567890123456)"),
+            None
+        );
+        assert_eq!(
+            scan_secret("Refer to the ghp_ documentation for personal access tokens."),
+            None
+        );
+        assert_eq!(
+            scan_secret("| Component | Hash |\n| app | 550e8400-e29b-41d4-a716-446655440000 |\n"),
+            None
+        );
+    }
+
+    #[test]
+    fn guide_size_boundary_32768_bytes_pass_and_32769_bytes_reject() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("repo.git");
+        std::fs::create_dir_all(&mirror).unwrap();
+
+        let pass_file = temp.path().join("pass_32768.md");
+        std::fs::write(&pass_file, vec![b'a'; MAX_GUIDE_FILE_BYTES]).unwrap();
+
+        let reject_file = temp.path().join("reject_32769.md");
+        std::fs::write(&reject_file, vec![b'a'; MAX_GUIDE_FILE_BYTES + 1]).unwrap();
+
+        // 1. Project level boundary
+        let guide_pass_proj = GuideConfig {
+            project: Some(pass_file.clone()),
+            environment: None,
+            components: BTreeMap::new(),
+        };
+        assert!(guide_pass_proj.load_snapshot("lane", &[]).is_ok());
+
+        let guide_reject_proj = GuideConfig {
+            project: Some(reject_file.clone()),
+            environment: None,
+            components: BTreeMap::new(),
+        };
+        let err = guide_reject_proj
+            .load_snapshot("lane", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("exceeds maximum allowed size of 32768 bytes"),
+            "actual: {err}"
+        );
+
+        // 2. Environment level boundary
+        let guide_pass_env = GuideConfig {
+            project: None,
+            environment: Some(pass_file.clone()),
+            components: BTreeMap::new(),
+        };
+        assert!(guide_pass_env.load_snapshot("lane", &[]).is_ok());
+
+        let guide_reject_env = GuideConfig {
+            project: None,
+            environment: Some(reject_file.clone()),
+            components: BTreeMap::new(),
+        };
+        assert!(guide_reject_env.load_snapshot("lane", &[]).is_err());
+
+        // 3. Component level boundary
+        let guide_pass_comp = GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::from([("app".into(), pass_file.clone())]),
+        };
+        assert!(
+            guide_pass_comp
+                .load_snapshot("lane", &["app".into()])
+                .is_ok()
+        );
+
+        let guide_reject_comp = GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::from([("app".into(), reject_file.clone())]),
+        };
+        assert!(
+            guide_reject_comp
+                .load_snapshot("lane", &["app".into()])
+                .is_err()
+        );
+
+        // 4. Config::validate integration with boundary
+        let mut lane = local_lane("lane", "project", &mirror);
+        lane.guide = Some(guide_pass_proj);
+        let mut config = Config {
+            mode: ConfigMode::Local,
+            lanes: vec![lane.clone()],
+            ..Config::default()
+        };
+        assert!(config.validate().is_ok());
+
+        lane.guide = Some(guide_reject_proj);
+        config.lanes = vec![lane];
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn guide_components_not_subset_of_lane_components_fails_validation() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("repo.git");
+        std::fs::create_dir_all(&mirror).unwrap();
+
+        let guide_file = temp.path().join("guide.md");
+        std::fs::write(&guide_file, "# Guide").unwrap();
+
+        let guide = GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::from([
+                ("service".into(), guide_file.clone()),
+                ("database".into(), guide_file.clone()),
+            ]),
+        };
+
+        // Lane declares only service and worker; database is extraneous
+        let err = guide
+            .load_snapshot("test-lane", &["service".into(), "worker".into()])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("guide component 'database' is not declared in lane 'test-lane'"),
+            "actual: {err}"
+        );
+
+        // Lane declares empty components; service is extraneous
+        let empty_guide = GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::from([("service".into(), guide_file)]),
+        };
+        let err2 = empty_guide
+            .load_snapshot("test-lane-empty", &[])
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err2.contains("guide component 'service' is not declared in lane 'test-lane-empty'"),
+            "actual: {err2}"
+        );
+
+        // Config::validate integration
+        let mut lane = local_lane("test-lane", "project", &mirror);
+        lane.components = vec!["service".into(), "worker".into()];
+        lane.guide = Some(guide);
+        let config = Config {
+            mode: ConfigMode::Local,
+            lanes: vec![lane],
+            ..Config::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn effective_profile_digest_invariant_across_guide_mutations() {
+        let temp = tempfile::tempdir().unwrap();
+        let overview = temp.path().join("overview.md");
+        std::fs::write(&overview, "# Initial Overview Content").unwrap();
+        let dev = temp.path().join("dev.md");
+        std::fs::write(&dev, "# Initial Dev Content").unwrap();
+        let app = temp.path().join("app.md");
+        std::fs::write(&app, "# Initial App Content").unwrap();
+        let other = temp.path().join("other.md");
+        std::fs::write(&other, "# Other Content").unwrap();
+
+        let mut lane = local_lane("dev-lane", "my-project", temp.path());
+        lane.components = vec!["app".into(), "worker".into()];
+        let config = Config::default();
+
+        // Baseline: guide is None
+        let d0 = config.effective_profile_digest(&lane).unwrap();
+
+        // Guide added
+        lane.guide = Some(GuideConfig {
+            project: Some(overview.clone()),
+            environment: Some(dev.clone()),
+            components: BTreeMap::from([("app".into(), app.clone())]),
+        });
+        let d1 = config.effective_profile_digest(&lane).unwrap();
+        assert_eq!(d0, d1, "adding guide must not change digest");
+
+        // Mutating file content on disk
+        std::fs::write(&overview, "# Completely Overhauled Content With More Text").unwrap();
+        std::fs::write(&dev, "# Rewritten dev guidelines\n1. Step one\n2. Step two").unwrap();
+        let d2 = config.effective_profile_digest(&lane).unwrap();
+        assert_eq!(d0, d2, "mutating guide file content must not change digest");
+
+        // Changing guide paths in config
+        lane.guide = Some(GuideConfig {
+            project: Some(other.clone()),
+            environment: Some(other.clone()),
+            components: BTreeMap::from([
+                ("app".into(), other.clone()),
+                ("worker".into(), other.clone()),
+            ]),
+        });
+        let d3 = config.effective_profile_digest(&lane).unwrap();
+        assert_eq!(d0, d3, "changing guide file paths must not change digest");
+
+        // Removing guide components
+        lane.guide = Some(GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::new(),
+        });
+        let d4 = config.effective_profile_digest(&lane).unwrap();
+        assert_eq!(d0, d4, "clearing guide fields must not change digest");
+
+        // Returning to None
+        lane.guide = None;
+        let d5 = config.effective_profile_digest(&lane).unwrap();
+        assert_eq!(d0, d5, "returning to guide None must preserve digest");
     }
 }

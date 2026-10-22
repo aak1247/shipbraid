@@ -31,7 +31,7 @@ SHIPBRAID_PREFIX="$HOME/.local/share/shipbraid"
 "$SHIPBRAID_PREFIX/bin/shipbraid" doctor --config "$SHIPBRAID_PREFIX/etc/config.toml"
 ```
 
-检查范围会按配置而异：local 不要求 Dashboard 或 API token；server 会检查已配置的 token、webhook 凭据和 Dashboard；两者都会检查 lane 的本地镜像与 release ref。`--check-local-runtime` 只探测 user systemd 与 cgroup v2；本机 adapter 使用这些能力，纯模拟的 `ScriptedExecutor` 不需要它们。
+检查范围会按配置而异：local 不要求 Dashboard 或 API token；server 会检查已配置的 token、webhook 凭据和 Dashboard；两者都会检查 lane 的本地镜像与 release ref。若 lane 配置了 `[lanes.guide]`，还会对其引用的指引文件（`config.guide_file`）做只读探测：验证文件存在性、常规文件属性、32 KiB 单文件大小上限、UTF-8 编码及秘密模式扫描（PEM 私钥、AWS/Google API Key、GitHub/GitLab/Slack/Anthropic Token 前缀等）；探针仅输出合规元数据与检查状态，绝不泄露文档内容或秘密值。`--check-local-runtime` 只探测 user systemd 与 cgroup v2；本机 adapter 使用这些能力，纯模拟的 `ScriptedExecutor` 不需要它们。
 
 报告中的 `field` 使用 `lanes[0]`、`tokens[0]` 等配置位置，按 TOML 中的顺序定位。配置值、私有路径、环境变量名、token、hook 参数和子进程原始错误均不输出。解析失败时检查 TOML 和字段类型；静态约束失败时核对必填字段、授权范围、lane 参数与 hook 设置，随后按单项建议修复。命令只检查，不自动修复。
 

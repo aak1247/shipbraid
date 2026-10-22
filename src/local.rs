@@ -727,6 +727,7 @@ mod tests {
                     executor: LaneExecutorConfig::Scripted,
                     failure_observe: None,
                     resource_admission: None,
+                    guide: None,
                 }],
                 scripted_phase_ms: 5,
                 tick_ms: 1,

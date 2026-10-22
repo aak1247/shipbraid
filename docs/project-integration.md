@@ -55,6 +55,27 @@ Shipbraid 协调发布请求，项目仍提供自己的构建、部署和独立�
 
 模拟执行器和合成项目只验证 Shipbraid 协议，不证明真实环境已接通。生产 lane 需另行明确授权并完成同等级的环境验收；不得因测试 lane 通过而自动开放生产权限。
 
+## 项目发布指引（权威知识来源）
+
+从 0.3.2-dev 开始，lane 配置支持可选的三级自然语言发布指引 `[lanes.guide]`，作为项目发布知识的**权威来源**：
+
+```toml
+[[lanes]]
+id = "myapp-dev"
+# ...其他字段不变...
+[lanes.guide]
+project = "guides/myapp/overview.md"        # 项目总述：发布线、镜像同步、审批边界
+environment = "guides/myapp/dev.md"         # 环境流程、参数要求、注意事项
+[lanes.guide.components]
+app = "guides/myapp/app.md"                 # 组件单独说明，键必须是 lane.components 成员
+worker = "guides/myapp/worker.md"
+```
+
+- **统一维护**：指引由管理员在协调器配置中统一维护，与 lane 范围绑定，告别各个业务仓库手抄模板的陈旧和漂移。
+- **动态查询**：Agent 可通过 API（`GET /v1/lanes/{id}/guide` 与 `GET /v1/guides/{project}`）或 MCP 工具按需获取最新指引，响应携带内容 SHA-256 供调用方审计。
+- **安全检查**：指引内容在协调器启动时一次性读入快照，实行 fail-closed 秘密扫描（严禁私钥、云凭据与平台 Token）与单文件 32 KiB 上限；doctor 工具提供只读合规检查。
+- **模板兜底**：下方的项目 `AGENTS.md` 模板继续保留，用于项目尚未配置在线指引时的初始参考与本地兜底。
+
 ## 项目 `AGENTS.md` 参考模板
 
 选择与实际安装一致的入口，记录 binary 兼容版本、受信镜像同步和独立验收证据。配置、账本、任务目录和凭据保存在源码仓库外。

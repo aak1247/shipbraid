@@ -20,7 +20,9 @@ use uuid::Uuid;
 
 use crate::{
     api::{self, ExecutorEventKind, ResolveAction},
-    config::{Config, ConfigMode, HookConfig, LaneExecutorConfig, ResolvedToken},
+    config::{
+        Config, ConfigMode, HookConfig, LaneExecutorConfig, LaneGuideSnapshot, ResolvedToken,
+    },
     domain::{
         Command, CommandDelivery, CommandDeliveryState, CommandKind, CoverageMode, DomainError,
         ExecutorResult, LOCAL_TENANT_ID, Lane, Phase, Priority, ReconcileIds, ReleaseRequest,
@@ -183,6 +185,7 @@ pub struct Service {
     executor: ScriptedExecutor,
     lane_executors: BTreeMap<String, LaneExecutorConfig>,
     resource_roots: Vec<ResourceRootConfig>,
+    lane_guides: BTreeMap<String, LaneGuideSnapshot>,
     _database_lock: DatabaseLock,
     ready: AtomicBool,
 }
@@ -192,6 +195,7 @@ impl Service {
         config
             .validate()
             .context("validate coordinator configuration")?;
+        let lane_guides = config.load_guides().context("load lane guides")?;
         let tokens = config.resolve_tokens().context("resolve API credentials")?;
         let database_path = canonical_database_path(&config.database_path)?;
         let database_lock = acquire_database_lock(&database_path)?;
@@ -408,6 +412,7 @@ impl Service {
                 .map(|lane| (lane.id.clone(), lane.executor.clone()))
                 .collect(),
             resource_roots,
+            lane_guides,
             _database_lock: database_lock,
             ready: AtomicBool::new(true),
         });
@@ -416,6 +421,18 @@ impl Service {
 
     pub fn tokens(&self) -> &[ResolvedToken] {
         &self.tokens
+    }
+
+    pub fn lane_guide(&self, lane_id: &str) -> Option<&LaneGuideSnapshot> {
+        self.lane_guides.get(lane_id)
+    }
+
+    pub fn lane_declared_components(&self, lane_id: &str) -> Option<&[String]> {
+        self.config
+            .lanes
+            .iter()
+            .find(|lane| lane.id == lane_id)
+            .map(|lane| lane.components.as_slice())
     }
 
     pub fn executor_kind(&self, lane_id: &str) -> &'static str {
@@ -2967,6 +2984,7 @@ mod tests {
                 request_parameters: BTreeMap::new(),
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
+                guide: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
@@ -3052,6 +3070,7 @@ mod tests {
                     root_id: "cache".into(),
                     reservation_bytes: 1024,
                 }),
+                guide: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
@@ -3278,6 +3297,7 @@ print(json.dumps(reply))
                     observe: hook.clone(),
                     verify: hook,
                 },
+                guide: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,

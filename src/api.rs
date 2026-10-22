@@ -1,4 +1,8 @@
-use std::{collections::BTreeSet, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    path::PathBuf,
+    sync::Arc,
+};
 
 use axum::{
     Json, Router,
@@ -19,7 +23,7 @@ use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
 use crate::{
-    config::ResolvedToken,
+    config::{GuideDocument, ResolvedToken},
     domain::{
         CoverageMode, DeliveryRun, Event, LOCAL_TENANT_ID, Lane, Phase, Priority, ReleaseRequest,
         RequestContext, RequestStatus, State as DomainState,
@@ -447,8 +451,10 @@ pub fn router(service: Arc<Service>) -> Router {
         .route("/resources/{resource_id}/events", get(resource_events))
         .route("/lanes", get(list_lanes))
         .route("/lanes/{lane_id}", get(get_lane))
+        .route("/lanes/{lane_id}/guide", get(get_lane_guide))
         .route("/lanes/{lane_id}/unpause", post(unpause_lane))
         .route("/lanes/{lane_id}/resolve-unknown", post(resolve_unknown))
+        .route("/guides/{project}", get(get_project_guide))
         .route("/requests", get(list_requests).post(create_request))
         .route("/requests/{request_id}", get(get_request))
         .route("/requests/{request_id}/logs", get(request_logs))
@@ -602,6 +608,191 @@ async fn get_lane(
         .ok_or_else(|| ApiError::missing("Lane not found."))?;
     require_lane(&actor, lane)?;
     Ok(Json(lane_view(lane, state.service.executor_kind(&lane.id))))
+}
+
+#[derive(Debug, Serialize)]
+struct LaneGuideResponse {
+    lane_id: String,
+    project: String,
+    environment: String,
+    sections: Vec<LaneGuideSection>,
+}
+
+#[derive(Debug, Serialize)]
+struct LaneGuideSection {
+    scope: &'static str,
+    name: String,
+    content_sha256: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectGuideResponse {
+    project: String,
+    overview: Option<GuideContent>,
+    environments: Vec<ProjectEnvironmentGuide>,
+    components: Vec<ProjectComponentGuide>,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct GuideContent {
+    content_sha256: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectEnvironmentGuide {
+    environment: String,
+    lane_ids: Vec<String>,
+    content_sha256: String,
+    content: String,
+}
+
+#[derive(Debug, Serialize)]
+struct ProjectComponentGuide {
+    component: String,
+    content_sha256: String,
+    content: String,
+}
+
+async fn get_lane_guide(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(lane_id): Path<String>,
+) -> Result<Json<LaneGuideResponse>, ApiError> {
+    require_non_executor(&actor)?;
+    let snapshot = state.service.snapshot().await;
+    let lane = snapshot
+        .lanes
+        .get(&lane_id)
+        .ok_or_else(|| ApiError::missing("Lane not found."))?;
+    require_lane(&actor, lane)?;
+
+    let mut sections = Vec::new();
+    if let Some(guide) = state.service.lane_guide(&lane_id) {
+        if let Some(doc) = &guide.project {
+            sections.push(LaneGuideSection {
+                scope: "project",
+                name: "project".into(),
+                content_sha256: doc.content_sha256.clone(),
+                content: doc.content.clone(),
+            });
+        }
+        if let Some(doc) = &guide.environment {
+            sections.push(LaneGuideSection {
+                scope: "environment",
+                name: lane.environment.clone(),
+                content_sha256: doc.content_sha256.clone(),
+                content: doc.content.clone(),
+            });
+        }
+        if let Some(declared) = state.service.lane_declared_components(&lane_id) {
+            for comp in declared {
+                if let Some(doc) = guide.components.get(comp) {
+                    sections.push(LaneGuideSection {
+                        scope: "component",
+                        name: comp.clone(),
+                        content_sha256: doc.content_sha256.clone(),
+                        content: doc.content.clone(),
+                    });
+                }
+            }
+        }
+    }
+
+    Ok(Json(LaneGuideResponse {
+        lane_id: lane.id.clone(),
+        project: lane.project.clone(),
+        environment: lane.environment.clone(),
+        sections,
+    }))
+}
+
+async fn get_project_guide(
+    State(state): State<ApiState>,
+    axum::extract::Extension(actor): axum::extract::Extension<Actor>,
+    Path(project): Path<String>,
+) -> Result<Json<ProjectGuideResponse>, ApiError> {
+    require_non_executor(&actor)?;
+    let snapshot = state.service.snapshot().await;
+    let mut visible_lanes: Vec<&Lane> = snapshot
+        .lanes
+        .values()
+        .filter(|lane| lane.project == project && lane_allowed(&actor, lane))
+        .collect();
+    if visible_lanes.is_empty() {
+        return Err(ApiError::forbidden());
+    }
+    visible_lanes.sort_by(|a, b| a.id.cmp(&b.id));
+
+    let mut overview = None;
+    let mut env_entries = BTreeMap::<PathBuf, (String, Vec<String>, GuideDocument)>::new();
+    let mut comp_entries = BTreeMap::<PathBuf, (String, GuideDocument)>::new();
+
+    for lane in &visible_lanes {
+        if let Some(guide) = state.service.lane_guide(&lane.id) {
+            if overview.is_none()
+                && let Some(doc) = &guide.project
+            {
+                overview = Some(GuideContent {
+                    content_sha256: doc.content_sha256.clone(),
+                    content: doc.content.clone(),
+                });
+            }
+            if let Some(doc) = &guide.environment {
+                env_entries
+                    .entry(doc.path.clone())
+                    .and_modify(|(_, lane_ids, _)| {
+                        if !lane_ids.contains(&lane.id) {
+                            lane_ids.push(lane.id.clone());
+                        }
+                    })
+                    .or_insert_with(|| {
+                        (lane.environment.clone(), vec![lane.id.clone()], doc.clone())
+                    });
+            }
+            if let Some(declared) = state.service.lane_declared_components(&lane.id) {
+                for comp in declared {
+                    if let Some(doc) = guide.components.get(comp) {
+                        comp_entries
+                            .entry(doc.path.clone())
+                            .or_insert_with(|| (comp.clone(), doc.clone()));
+                    }
+                }
+            }
+        }
+    }
+
+    let mut environments: Vec<ProjectEnvironmentGuide> = env_entries
+        .into_values()
+        .map(|(environment, mut lane_ids, doc)| {
+            lane_ids.sort();
+            ProjectEnvironmentGuide {
+                environment,
+                lane_ids,
+                content_sha256: doc.content_sha256,
+                content: doc.content,
+            }
+        })
+        .collect();
+    environments.sort_by(|a, b| a.environment.cmp(&b.environment));
+
+    let mut components: Vec<ProjectComponentGuide> = comp_entries
+        .into_values()
+        .map(|(component, doc)| ProjectComponentGuide {
+            component,
+            content_sha256: doc.content_sha256,
+            content: doc.content,
+        })
+        .collect();
+    components.sort_by(|a, b| a.component.cmp(&b.component));
+
+    Ok(Json(ProjectGuideResponse {
+        project,
+        overview,
+        environments,
+        components,
+    }))
 }
 
 #[derive(Debug, Serialize)]
@@ -1940,6 +2131,7 @@ mod tests {
             request_parameters: parameters.clone(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
+            guide: None,
         };
         let service = Service::open(Config {
             database_path: temp.path().join("ledger.db"),
@@ -2585,6 +2777,7 @@ mod tests {
             request_parameters: Default::default(),
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
+            guide: None,
         };
         let config = Config {
             database_path: temp.path().join("state.db"),
@@ -2785,6 +2978,7 @@ mod tests {
                 request_parameters: Default::default(),
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
+                guide: None,
             }],
             artifacts_dir: Some(artifacts_path),
             ..Config::default()
@@ -2924,5 +3118,1016 @@ mod tests {
                 .iter()
                 .any(|e| e.kind == "lane_unpaused" && e.lane_id == "lane-one")
         );
+    }
+
+    #[tokio::test]
+    async fn lane_guide_and_project_guide_api_endpoints_work_with_auth_and_deduplication() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        // Guide files
+        let guides_dir = temp.path().join("guides");
+        std::fs::create_dir_all(&guides_dir).unwrap();
+        let overview_file = guides_dir.join("overview.md");
+        std::fs::write(&overview_file, "# Project Overview\nGeneral guidelines.").unwrap();
+        let dev_env_file = guides_dir.join("dev.md");
+        std::fs::write(&dev_env_file, "# Dev Environment\nLocal dev guidelines.").unwrap();
+        let prod_env_file = guides_dir.join("prod.md");
+        std::fs::write(
+            &prod_env_file,
+            "# Prod Environment\nStrict production guidelines.",
+        )
+        .unwrap();
+        let app_comp_file = guides_dir.join("app.md");
+        std::fs::write(&app_comp_file, "# App Component\nApp guidelines.").unwrap();
+        let worker_comp_file = guides_dir.join("worker.md");
+        std::fs::write(&worker_comp_file, "# Worker Component\nWorker guidelines.").unwrap();
+
+        let dev_token_env = format!("SHIPBRAID_TEST_DEV_{}", Uuid::new_v4().simple());
+        let dev_token = "dev-operator-credential-32-bytes-long";
+        unsafe { std::env::set_var(&dev_token_env, dev_token) };
+
+        let other_token_env = format!("SHIPBRAID_TEST_OTHER_{}", Uuid::new_v4().simple());
+        let other_token = "other-operator-credential-32-bytes-long";
+        unsafe { std::env::set_var(&other_token_env, other_token) };
+
+        let config = Config {
+            database_path: temp.path().join("state.db"),
+            tokens: vec![
+                TokenConfig {
+                    id: "dev-operator".into(),
+                    token_env: dev_token_env.clone(),
+                    lanes: vec!["myapp-dev".into(), "myapp-dev-canary".into()],
+                    projects: vec![],
+                    urgent: false,
+                    admin: false,
+                    executor: false,
+                },
+                TokenConfig {
+                    id: "other-operator".into(),
+                    token_env: other_token_env.clone(),
+                    lanes: vec!["other-lane".into()],
+                    projects: vec![],
+                    urgent: false,
+                    admin: false,
+                    executor: false,
+                },
+            ],
+            lanes: vec![
+                LaneConfig {
+                    id: "myapp-dev".into(),
+                    project: "myapp".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["worker".into(), "app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(overview_file.clone()),
+                        environment: Some(dev_env_file.clone()),
+                        components: BTreeMap::from([
+                            ("app".into(), app_comp_file.clone()),
+                            ("worker".into(), worker_comp_file.clone()),
+                        ]),
+                    }),
+                },
+                LaneConfig {
+                    id: "myapp-dev-canary".into(),
+                    project: "myapp".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(overview_file.clone()),
+                        environment: Some(dev_env_file.clone()),
+                        components: BTreeMap::from([("app".into(), app_comp_file.clone())]),
+                    }),
+                },
+                LaneConfig {
+                    id: "myapp-prod".into(),
+                    project: "myapp".into(),
+                    environment: "prod".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(overview_file.clone()),
+                        environment: Some(prod_env_file.clone()),
+                        components: BTreeMap::from([("app".into(), app_comp_file.clone())]),
+                    }),
+                },
+                LaneConfig {
+                    id: "other-lane".into(),
+                    project: "other-project".into(),
+                    environment: "test".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: None,
+                },
+            ],
+            ..Config::default()
+        };
+
+        let service = Service::open(config).await.unwrap();
+        unsafe {
+            std::env::remove_var(&dev_token_env);
+            std::env::remove_var(&other_token_env);
+        }
+        let app = router(service);
+
+        // 1. GET /v1/lanes/myapp-dev/guide with authorized token
+        let resp = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(dev_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        assert_eq!(payload["lane_id"], "myapp-dev");
+        assert_eq!(payload["project"], "myapp");
+        assert_eq!(payload["environment"], "dev");
+
+        let sections = payload["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 4);
+        // Ordering: project -> environment -> component in lane.components declaration order
+        assert_eq!(sections[0]["scope"], "project");
+        assert_eq!(sections[0]["name"], "project");
+        assert_eq!(
+            sections[0]["content"],
+            "# Project Overview\nGeneral guidelines."
+        );
+        assert_eq!(
+            sections[0]["content_sha256"],
+            hex::encode(Sha256::digest(b"# Project Overview\nGeneral guidelines."))
+        );
+
+        assert_eq!(sections[1]["scope"], "environment");
+        assert_eq!(sections[1]["name"], "dev");
+        assert_eq!(
+            sections[1]["content"],
+            "# Dev Environment\nLocal dev guidelines."
+        );
+
+        // In myapp-dev, components was declared as ["worker", "app"]
+        assert_eq!(sections[2]["scope"], "component");
+        assert_eq!(sections[2]["name"], "worker");
+        assert_eq!(
+            sections[2]["content"],
+            "# Worker Component\nWorker guidelines."
+        );
+
+        assert_eq!(sections[3]["scope"], "component");
+        assert_eq!(sections[3]["name"], "app");
+        assert_eq!(sections[3]["content"], "# App Component\nApp guidelines.");
+
+        // 2. Unconfigured lane returns 200 with empty sections
+        let resp_unconfigured = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/other-lane/guide",
+            Some(other_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_unconfigured.status(), StatusCode::OK);
+        let payload_unconf: Value = serde_json::from_slice(
+            &resp_unconfigured
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(payload_unconf["sections"].as_array().unwrap().len(), 0);
+
+        // 3. Unauthorized token for lane guide returns 403
+        let resp_forbidden = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(other_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_forbidden.status(), StatusCode::FORBIDDEN);
+
+        // 4. Non-existent lane returns 404
+        let resp_missing = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/nonexistent/guide",
+            Some(dev_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_missing.status(), StatusCode::NOT_FOUND);
+
+        // 5. GET /v1/guides/myapp aggregates visible lanes and deduplicates by file path
+        let resp_project = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(dev_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_project.status(), StatusCode::OK);
+        let proj_payload: Value =
+            serde_json::from_slice(&resp_project.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        assert_eq!(proj_payload["project"], "myapp");
+        assert_eq!(
+            proj_payload["overview"]["content"],
+            "# Project Overview\nGeneral guidelines."
+        );
+
+        let envs = proj_payload["environments"].as_array().unwrap();
+        assert_eq!(
+            envs.len(),
+            1,
+            "only dev environment is visible to dev-operator"
+        );
+        assert_eq!(envs[0]["environment"], "dev");
+        let env_lanes = envs[0]["lane_ids"].as_array().unwrap();
+        assert_eq!(env_lanes.len(), 2);
+        assert_eq!(env_lanes[0], "myapp-dev");
+        assert_eq!(env_lanes[1], "myapp-dev-canary");
+
+        let comps = proj_payload["components"].as_array().unwrap();
+        assert_eq!(comps.len(), 2);
+        assert_eq!(comps[0]["component"], "app");
+        assert_eq!(comps[1]["component"], "worker");
+
+        // 6. Token with no visible lane in project returns 403
+        let resp_proj_forbidden = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(other_token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_proj_forbidden.status(), StatusCode::FORBIDDEN);
+        let err_body: Value = serde_json::from_slice(
+            &resp_proj_forbidden
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        assert_eq!(err_body["code"], "forbidden");
+        assert_eq!(err_body["retryable"], false);
+    }
+
+    #[tokio::test]
+    async fn guide_startup_rejections_fail_closed() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let token_env = format!("SHIPBRAID_STARTUP_TEST_{}", Uuid::new_v4().simple());
+        let token = "test-operator-credential-32-bytes-long";
+        unsafe { std::env::set_var(&token_env, token) };
+
+        // Test 1: Secret pattern in guide file rejects Service::open
+        let secret_file = temp.path().join("secret.md");
+        std::fs::write(&secret_file, "key = AKIAIOSFODNN7EXAMPLE").unwrap();
+
+        let make_config = |guide_file: PathBuf| Config {
+            database_path: temp
+                .path()
+                .join(format!("state-{}.db", Uuid::new_v4().simple())),
+            tokens: vec![TokenConfig {
+                id: "operator".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["lane".into()],
+                projects: vec![],
+                urgent: false,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "lane".into(),
+                project: "project".into(),
+                environment: "dev".into(),
+                repository_id: "repo".into(),
+                repository_path: mirror.clone(),
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "synthetic-profile".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                failure_observe: None,
+                resource_admission: None,
+                request_parameters: Default::default(),
+                enabled: true,
+                executor: LaneExecutorConfig::Scripted,
+                guide: Some(crate::config::GuideConfig {
+                    project: Some(guide_file),
+                    environment: None,
+                    components: BTreeMap::new(),
+                }),
+            }],
+            ..Config::default()
+        };
+
+        assert!(Service::open(make_config(secret_file)).await.is_err());
+
+        // Test 2: Oversized file rejects Service::open
+        let large_file = temp.path().join("large.md");
+        std::fs::write(
+            &large_file,
+            vec![b'x'; crate::config::MAX_GUIDE_FILE_BYTES + 1],
+        )
+        .unwrap();
+        assert!(Service::open(make_config(large_file)).await.is_err());
+
+        // Test 3: Component not in lane.components rejects Service::open
+        let valid_file = temp.path().join("valid.md");
+        std::fs::write(&valid_file, "# Valid Guide").unwrap();
+        let mut bad_component_config = make_config(valid_file.clone());
+        bad_component_config.lanes[0].guide = Some(crate::config::GuideConfig {
+            project: None,
+            environment: None,
+            components: BTreeMap::from([("nonexistent-comp".into(), valid_file)]),
+        });
+        assert!(Service::open(bad_component_config).await.is_err());
+
+        unsafe { std::env::remove_var(&token_env) };
+    }
+
+    #[tokio::test]
+    async fn lane_guide_endpoint_order_and_selective_sections() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let guides_dir = temp.path().join("guides");
+        std::fs::create_dir_all(&guides_dir).unwrap();
+        let proj_file = guides_dir.join("proj.md");
+        std::fs::write(&proj_file, "# Project Title").unwrap();
+        let env_file = guides_dir.join("env.md");
+        std::fs::write(&env_file, "# Env Dev").unwrap();
+        let zeta_file = guides_dir.join("zeta.md");
+        std::fs::write(&zeta_file, "# Zeta Component").unwrap();
+        let alpha_file = guides_dir.join("alpha.md");
+        std::fs::write(&alpha_file, "# Alpha Component").unwrap();
+        let beta_file = guides_dir.join("beta.md");
+        std::fs::write(&beta_file, "# Beta Component").unwrap();
+
+        let token_env = format!("SHIPBRAID_ORDER_TEST_{}", Uuid::new_v4().simple());
+        let token = "order-test-token-credential-32-chars";
+        unsafe { std::env::set_var(&token_env, token) };
+
+        let config = Config {
+            database_path: temp.path().join("state.db"),
+            tokens: vec![TokenConfig {
+                id: "operator".into(),
+                token_env: token_env.clone(),
+                lanes: vec![
+                    "order-lane".into(),
+                    "partial-env-comp".into(),
+                    "partial-proj-only".into(),
+                ],
+                projects: vec![],
+                urgent: false,
+                admin: false,
+                executor: false,
+            }],
+            lanes: vec![
+                // 1. Full guide with reverse component declaration order: zeta, alpha, beta
+                LaneConfig {
+                    id: "order-lane".into(),
+                    project: "proj".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["zeta".into(), "alpha".into(), "beta".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(proj_file.clone()),
+                        environment: Some(env_file.clone()),
+                        components: BTreeMap::from([
+                            ("alpha".into(), alpha_file.clone()),
+                            ("beta".into(), beta_file.clone()),
+                            ("zeta".into(), zeta_file.clone()),
+                        ]),
+                    }),
+                },
+                // 2. Partial guide: only environment and beta
+                LaneConfig {
+                    id: "partial-env-comp".into(),
+                    project: "proj".into(),
+                    environment: "staging".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["beta".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: None,
+                        environment: Some(env_file.clone()),
+                        components: BTreeMap::from([("beta".into(), beta_file.clone())]),
+                    }),
+                },
+                // 3. Partial guide: only project
+                LaneConfig {
+                    id: "partial-proj-only".into(),
+                    project: "proj".into(),
+                    environment: "prod".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["alpha".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(proj_file.clone()),
+                        environment: None,
+                        components: BTreeMap::new(),
+                    }),
+                },
+            ],
+            ..Config::default()
+        };
+
+        let service = Service::open(config).await.unwrap();
+        unsafe { std::env::remove_var(&token_env) };
+        let app = router(service);
+
+        // Assert order in full guide: project -> environment -> component in lane declaration order
+        let resp = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/order-lane/guide",
+            Some(token),
+            None,
+        )
+        .await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+        let sections = payload["sections"].as_array().unwrap();
+        assert_eq!(sections.len(), 5);
+
+        assert_eq!(sections[0]["scope"], "project");
+        assert_eq!(sections[0]["name"], "project");
+
+        assert_eq!(sections[1]["scope"], "environment");
+        assert_eq!(sections[1]["name"], "dev");
+
+        // Components MUST follow lane.components declaration order ["zeta", "alpha", "beta"],
+        // not the BTreeMap key order ["alpha", "beta", "zeta"]
+        assert_eq!(sections[2]["scope"], "component");
+        assert_eq!(sections[2]["name"], "zeta");
+
+        assert_eq!(sections[3]["scope"], "component");
+        assert_eq!(sections[3]["name"], "alpha");
+
+        assert_eq!(sections[4]["scope"], "component");
+        assert_eq!(sections[4]["name"], "beta");
+
+        // Assert partial guide 1: only environment and beta
+        let resp_partial = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/partial-env-comp/guide",
+            Some(token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_partial.status(), StatusCode::OK);
+        let partial_payload: Value =
+            serde_json::from_slice(&resp_partial.into_body().collect().await.unwrap().to_bytes())
+                .unwrap();
+        let p_sections = partial_payload["sections"].as_array().unwrap();
+        assert_eq!(p_sections.len(), 2);
+        assert_eq!(p_sections[0]["scope"], "environment");
+        assert_eq!(p_sections[0]["name"], "staging");
+        assert_eq!(p_sections[1]["scope"], "component");
+        assert_eq!(p_sections[1]["name"], "beta");
+
+        // Assert partial guide 2: only project
+        let resp_proj_only = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/partial-proj-only/guide",
+            Some(token),
+            None,
+        )
+        .await;
+        assert_eq!(resp_proj_only.status(), StatusCode::OK);
+        let po_payload: Value = serde_json::from_slice(
+            &resp_proj_only
+                .into_body()
+                .collect()
+                .await
+                .unwrap()
+                .to_bytes(),
+        )
+        .unwrap();
+        let po_sections = po_payload["sections"].as_array().unwrap();
+        assert_eq!(po_sections.len(), 1);
+        assert_eq!(po_sections[0]["scope"], "project");
+        assert_eq!(po_sections[0]["name"], "project");
+    }
+
+    #[tokio::test]
+    async fn lane_guide_and_project_guide_authorization_and_executor_rejection() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let guides_dir = temp.path().join("guides");
+        std::fs::create_dir_all(&guides_dir).unwrap();
+        let proj_file = guides_dir.join("proj.md");
+        std::fs::write(&proj_file, "# Project Guide").unwrap();
+
+        let admin_token_env = format!("SHIPBRAID_AUTH_ADMIN_{}", Uuid::new_v4().simple());
+        let admin_token = "admin-credential-32-bytes-long00";
+        unsafe { std::env::set_var(&admin_token_env, admin_token) };
+
+        let proj_token_env = format!("SHIPBRAID_AUTH_PROJ_{}", Uuid::new_v4().simple());
+        let proj_token = "proj-credential-32-bytes-long000";
+        unsafe { std::env::set_var(&proj_token_env, proj_token) };
+
+        let lane_token_env = format!("SHIPBRAID_AUTH_LANE_{}", Uuid::new_v4().simple());
+        let lane_token = "lane-credential-32-bytes-long000";
+        unsafe { std::env::set_var(&lane_token_env, lane_token) };
+
+        let exec_token_env = format!("SHIPBRAID_AUTH_EXEC_{}", Uuid::new_v4().simple());
+        let exec_token = "exec-credential-32-bytes-long000";
+        unsafe { std::env::set_var(&exec_token_env, exec_token) };
+
+        let other_token_env = format!("SHIPBRAID_AUTH_OTHER_{}", Uuid::new_v4().simple());
+        let other_token = "other-credential-32-bytes-long00";
+        unsafe { std::env::set_var(&other_token_env, other_token) };
+
+        let config = Config {
+            database_path: temp.path().join("state.db"),
+            tokens: vec![
+                TokenConfig {
+                    id: "admin-token".into(),
+                    token_env: admin_token_env.clone(),
+                    lanes: vec![],
+                    projects: vec![],
+                    urgent: false,
+                    admin: true,
+                    executor: false,
+                },
+                TokenConfig {
+                    id: "proj-token".into(),
+                    token_env: proj_token_env.clone(),
+                    lanes: vec![],
+                    projects: vec!["myapp".into()],
+                    urgent: false,
+                    admin: false,
+                    executor: false,
+                },
+                TokenConfig {
+                    id: "lane-token".into(),
+                    token_env: lane_token_env.clone(),
+                    lanes: vec!["myapp-dev".into()],
+                    projects: vec![],
+                    urgent: false,
+                    admin: false,
+                    executor: false,
+                },
+                TokenConfig {
+                    id: "exec-token".into(),
+                    token_env: exec_token_env.clone(),
+                    lanes: vec!["myapp-dev".into()],
+                    projects: vec!["myapp".into()],
+                    urgent: false,
+                    admin: false,
+                    executor: true,
+                },
+                TokenConfig {
+                    id: "other-token".into(),
+                    token_env: other_token_env.clone(),
+                    lanes: vec!["other-lane".into()],
+                    projects: vec![],
+                    urgent: false,
+                    admin: false,
+                    executor: false,
+                },
+            ],
+            lanes: vec![
+                LaneConfig {
+                    id: "myapp-dev".into(),
+                    project: "myapp".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: Some(proj_file.clone()),
+                        environment: None,
+                        components: BTreeMap::new(),
+                    }),
+                },
+                LaneConfig {
+                    id: "other-lane".into(),
+                    project: "other-app".into(),
+                    environment: "test".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["app".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: None,
+                },
+            ],
+            ..Config::default()
+        };
+
+        let service = Service::open(config).await.unwrap();
+        unsafe {
+            std::env::remove_var(&admin_token_env);
+            std::env::remove_var(&proj_token_env);
+            std::env::remove_var(&lane_token_env);
+            std::env::remove_var(&exec_token_env);
+            std::env::remove_var(&other_token_env);
+        }
+        let app = router(service);
+
+        // 1. GET /v1/lanes/myapp-dev/guide permissions
+        // Admin token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(admin_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Project-scoped token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(proj_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Lane-scoped token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(lane_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Executor token -> FORBIDDEN (require_non_executor)
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(exec_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // Unauthorized token -> FORBIDDEN
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/lanes/myapp-dev/guide",
+            Some(other_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // 2. GET /v1/guides/myapp permissions
+        // Admin token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(admin_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Project-scoped token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(proj_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Lane-scoped token -> OK
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(lane_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::OK);
+
+        // Executor token -> FORBIDDEN (require_non_executor)
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(exec_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+
+        // Other token (no visible lanes in myapp) -> FORBIDDEN
+        let r = send(
+            app.clone(),
+            "GET",
+            "/v1/guides/myapp",
+            Some(other_token),
+            None,
+        )
+        .await;
+        assert_eq!(r.status(), StatusCode::FORBIDDEN);
+    }
+
+    #[tokio::test]
+    async fn project_guide_cross_environment_aggregation_and_null_overview() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let guides_dir = temp.path().join("guides");
+        std::fs::create_dir_all(&guides_dir).unwrap();
+        let dev_env_file = guides_dir.join("dev.md");
+        std::fs::write(&dev_env_file, "# Dev Guidelines").unwrap();
+        let staging_env_file = guides_dir.join("staging.md");
+        std::fs::write(&staging_env_file, "# Staging Guidelines").unwrap();
+
+        let web_comp_file = guides_dir.join("web.md");
+        std::fs::write(&web_comp_file, "# Web Component").unwrap();
+        let api_comp_file = guides_dir.join("api.md");
+        std::fs::write(&api_comp_file, "# API Component").unwrap();
+        let worker_comp_file = guides_dir.join("worker.md");
+        std::fs::write(&worker_comp_file, "# Worker Component").unwrap();
+
+        let token_env = format!("SHIPBRAID_AGG_TEST_{}", Uuid::new_v4().simple());
+        let token = "agg-operator-token-32-bytes-long";
+        unsafe { std::env::set_var(&token_env, token) };
+
+        let config = Config {
+            database_path: temp.path().join("state.db"),
+            tokens: vec![TokenConfig {
+                id: "agg-operator".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["agg-dev-1".into(), "agg-dev-2".into(), "agg-staging".into()],
+                projects: vec![],
+                urgent: false,
+                admin: false,
+                executor: false,
+            }],
+            lanes: vec![
+                // Lane 1: dev env, web & api, NO project overview
+                LaneConfig {
+                    id: "agg-dev-1".into(),
+                    project: "agg-app".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["web".into(), "api".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: None,
+                        environment: Some(dev_env_file.clone()),
+                        components: BTreeMap::from([
+                            ("web".into(), web_comp_file.clone()),
+                            ("api".into(), api_comp_file.clone()),
+                        ]),
+                    }),
+                },
+                // Lane 2: dev env, web only, sharing dev_env_file and web_comp_file, NO project overview
+                LaneConfig {
+                    id: "agg-dev-2".into(),
+                    project: "agg-app".into(),
+                    environment: "dev".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["web".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: None,
+                        environment: Some(dev_env_file.clone()),
+                        components: BTreeMap::from([("web".into(), web_comp_file.clone())]),
+                    }),
+                },
+                // Lane 3: staging env, api & worker, sharing api_comp_file with dev, NO project overview
+                LaneConfig {
+                    id: "agg-staging".into(),
+                    project: "agg-app".into(),
+                    environment: "staging".into(),
+                    repository_id: "repo".into(),
+                    repository_path: mirror.clone(),
+                    release_ref: "refs/heads/main".into(),
+                    profile_digest: "synthetic-profile".into(),
+                    components: vec!["api".into(), "worker".into()],
+                    allow_descendant: false,
+                    allow_preemption: false,
+                    failure_observe: None,
+                    resource_admission: None,
+                    request_parameters: Default::default(),
+                    enabled: true,
+                    executor: LaneExecutorConfig::Scripted,
+                    guide: Some(crate::config::GuideConfig {
+                        project: None,
+                        environment: Some(staging_env_file.clone()),
+                        components: BTreeMap::from([
+                            ("api".into(), api_comp_file.clone()),
+                            ("worker".into(), worker_comp_file.clone()),
+                        ]),
+                    }),
+                },
+            ],
+            ..Config::default()
+        };
+
+        let service = Service::open(config).await.unwrap();
+        unsafe { std::env::remove_var(&token_env) };
+        let app = router(service);
+
+        let resp = send(app.clone(), "GET", "/v1/guides/agg-app", Some(token), None).await;
+        assert_eq!(resp.status(), StatusCode::OK);
+        let payload: Value =
+            serde_json::from_slice(&resp.into_body().collect().await.unwrap().to_bytes()).unwrap();
+
+        assert_eq!(payload["project"], "agg-app");
+        // Overview is null when unconfigured
+        assert!(
+            payload["overview"].is_null(),
+            "expected overview to be null when unconfigured"
+        );
+
+        // Environments aggregated across dev and staging
+        let envs = payload["environments"].as_array().unwrap();
+        assert_eq!(envs.len(), 2);
+
+        // Ordered alphabetically: dev, then staging
+        assert_eq!(envs[0]["environment"], "dev");
+        let dev_lanes = envs[0]["lane_ids"].as_array().unwrap();
+        assert_eq!(dev_lanes.len(), 2);
+        assert_eq!(dev_lanes[0], "agg-dev-1");
+        assert_eq!(dev_lanes[1], "agg-dev-2");
+
+        assert_eq!(envs[1]["environment"], "staging");
+        let staging_lanes = envs[1]["lane_ids"].as_array().unwrap();
+        assert_eq!(staging_lanes.len(), 1);
+        assert_eq!(staging_lanes[0], "agg-staging");
+
+        // Components deduplicated by file path: "web", "api", "worker"
+        let comps = payload["components"].as_array().unwrap();
+        assert_eq!(
+            comps.len(),
+            3,
+            "components must be deduplicated across lanes"
+        );
+        // Ordered alphabetically: api, web, worker
+        assert_eq!(comps[0]["component"], "api");
+        assert_eq!(comps[1]["component"], "web");
+        assert_eq!(comps[2]["component"], "worker");
     }
 }

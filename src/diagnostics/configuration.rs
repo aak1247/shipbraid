@@ -64,6 +64,9 @@ where
                 &mut checks,
             );
         }
+        if let Some(guide) = &lane.guide {
+            guide_checks(guide, &lane_field, &mut checks);
+        }
     }
 
     if let Some(dashboard_dir) = &config.dashboard_dir {
@@ -420,6 +423,92 @@ fn readable_regular_file(path: &Path) -> bool {
     fs::metadata(path).is_ok_and(|metadata| metadata.is_file()) && File::open(path).is_ok()
 }
 
+fn guide_checks(guide: &crate::config::GuideConfig, lane_field: &str, checks: &mut Vec<Check>) {
+    if let Some(project) = &guide.project {
+        check_guide_file(project, &format!("{lane_field}.guide.project"), checks);
+    }
+    if let Some(environment) = &guide.environment {
+        check_guide_file(
+            environment,
+            &format!("{lane_field}.guide.environment"),
+            checks,
+        );
+    }
+    for (component, path) in &guide.components {
+        check_guide_file(
+            path,
+            &format!("{lane_field}.guide.components.{component}"),
+            checks,
+        );
+    }
+}
+
+fn check_guide_file(path: &Path, field: &str, checks: &mut Vec<Check>) {
+    if !path.is_file() {
+        checks.push(Check::new(
+            "config.guide_file",
+            CheckStatus::Fail,
+            field,
+            "Configured guide file is missing or not a regular file.",
+            "Create a readable markdown file at the configured path.",
+        ));
+        return;
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            checks.push(Check::new(
+                "config.guide_file",
+                CheckStatus::Fail,
+                field,
+                "Configured guide file metadata cannot be read.",
+                "Ensure the configured guide file is accessible.",
+            ));
+            return;
+        }
+    };
+    if metadata.len() > crate::config::MAX_GUIDE_FILE_BYTES as u64 {
+        checks.push(Check::new(
+            "config.guide_file",
+            CheckStatus::Fail,
+            field,
+            "Configured guide file exceeds maximum allowed size.",
+            "Reduce the guide file size to 32768 bytes or less.",
+        ));
+        return;
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            checks.push(Check::new(
+                "config.guide_file",
+                CheckStatus::Fail,
+                field,
+                "Configured guide file is not valid UTF-8.",
+                "Ensure the guide file is encoded as UTF-8.",
+            ));
+            return;
+        }
+    };
+    if crate::config::scan_secret(&content).is_some() {
+        checks.push(Check::new(
+            "config.guide_file",
+            CheckStatus::Fail,
+            field,
+            "Configured guide file contains prohibited secret patterns.",
+            "Remove all secrets or credentials from the guide file.",
+        ));
+        return;
+    }
+    checks.push(Check::new(
+        "config.guide_file",
+        CheckStatus::Pass,
+        field,
+        "Configured guide file is present, within size limits, and contains no secret patterns.",
+        "No action is needed.",
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, ffi::OsString, fs, path::PathBuf};
@@ -451,6 +540,7 @@ mod tests {
             executor,
             failure_observe,
             resource_admission: None,
+            guide: None,
         }
     }
 
@@ -693,5 +783,123 @@ mod tests {
             .collect::<String>();
         assert!(!report.contains("bad\nheader"));
         assert!(!report.contains("valid-token"));
+    }
+
+    #[test]
+    fn guide_files_are_checked_for_presence_size_and_secrets_without_revealing_content() {
+        let temp = tempfile::tempdir().unwrap();
+        let good_file = temp.path().join("good.md");
+        fs::write(&good_file, "# Benign documentation\nSecret canary: safe").unwrap();
+        let missing_file = temp.path().join("missing.md");
+        let large_file = temp.path().join("large.md");
+        fs::write(
+            &large_file,
+            vec![b'x'; crate::config::MAX_GUIDE_FILE_BYTES + 10],
+        )
+        .unwrap();
+        let secret_file = temp.path().join("secret.md");
+        let secret_canary = "ghp_1234567890123456";
+        fs::write(&secret_file, format!("Token: {secret_canary}")).unwrap();
+
+        let mut lane = lane_with(LaneExecutorConfig::Scripted, None);
+        lane.guide = Some(crate::config::GuideConfig {
+            project: Some(good_file),
+            environment: Some(missing_file),
+            components: std::collections::BTreeMap::from([
+                ("app".into(), large_file),
+                ("secret".into(), secret_file),
+            ]),
+        });
+
+        let config = Config {
+            lanes: vec![lane],
+            ..Config::default()
+        };
+
+        let checks = configuration_checks_with(&config, &|_| Err(VarError::NotPresent), None);
+
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.project"),
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.environment"),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.components.app"),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.components.secret"),
+            CheckStatus::Fail
+        );
+
+        let report = checks
+            .iter()
+            .map(|check| format!("{} {} {}", check.field, check.message, check.suggestion))
+            .collect::<String>();
+        assert!(
+            !report.contains(secret_canary),
+            "doctor probe must not leak secret content"
+        );
+        assert!(
+            !report.contains("safe"),
+            "doctor probe must not output benign file content"
+        );
+    }
+
+    #[test]
+    fn guide_doctor_checks_invalid_utf8_and_exact_size_boundaries() {
+        let temp = tempfile::tempdir().unwrap();
+        let exact_size_file = temp.path().join("exact.md");
+        fs::write(
+            &exact_size_file,
+            vec![b'#'; crate::config::MAX_GUIDE_FILE_BYTES],
+        )
+        .unwrap();
+
+        let oversized_file = temp.path().join("oversized.md");
+        fs::write(
+            &oversized_file,
+            vec![b'#'; crate::config::MAX_GUIDE_FILE_BYTES + 1],
+        )
+        .unwrap();
+
+        let non_utf8_file = temp.path().join("invalid_utf8.md");
+        fs::write(&non_utf8_file, [0xFF, 0xFE, 0xFD, 0x80]).unwrap();
+
+        let mut lane = lane_with(LaneExecutorConfig::Scripted, None);
+        lane.guide = Some(crate::config::GuideConfig {
+            project: Some(exact_size_file),
+            environment: Some(oversized_file),
+            components: std::collections::BTreeMap::from([("non_utf8".into(), non_utf8_file)]),
+        });
+
+        let config = Config {
+            lanes: vec![lane],
+            ..Config::default()
+        };
+
+        let checks = configuration_checks_with(&config, &|_| Err(VarError::NotPresent), None);
+
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.project"),
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.environment"),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].guide.components.non_utf8"),
+            CheckStatus::Fail
+        );
+
+        let non_utf8_check = checks
+            .iter()
+            .find(|c| c.field == "lanes[0].guide.components.non_utf8")
+            .unwrap();
+        assert!(non_utf8_check.message.contains("not valid UTF-8"));
     }
 }

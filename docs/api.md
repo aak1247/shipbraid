@@ -9,6 +9,8 @@ Lane/run/event lists return `{ "items": [...] }`. Request lists return `{ "items
 | GET | `/v1/system` | Authenticated principal, executor mix, version and persistent drain flag |
 | GET | `/v1/lanes` | Authorized lanes |
 | GET | `/v1/lanes/{id}` | Lane ownership/generation/block reason |
+| GET | `/v1/lanes/{id}/guide` | Lane release guide (project, environment, components) |
+| GET | `/v1/guides/{project}` | Aggregated release guide across visible lanes in a project |
 | GET | `/v1/requests?lane_id=...` | Requests, newest first |
 | GET | `/v1/requests/{id}` | Request and satisfaction receipt details |
 | GET | `/v1/requests/{id}/logs?cursor=...&limit=200` | Current run's logs with a request/run-bound cursor |
@@ -75,6 +77,54 @@ The resource API requires an admin token. Registration accepts an existing path 
 ```
 
 Kinds that may appear as GC candidates are `build_cache`, `sccache`, and `temporary_artifact`, and only when marked recreatable. Pins (`active_execution`, `unknown_execution`, `current_release`, `rollback_candidate`, `recovery_backup`, `frozen_hook`, `service_configuration`, or `manual` plus a `reference_id`) protect a resource. Unconfigured roots, missing or moved paths, unresolved run references, non-recreatable data, and active/unknown reservations are reported as blockers. Audit events are append-only and registrations cannot be deleted through SQL; pin removal is itself audited. `gc-plan` reports estimates and selected candidates only. It has no apply mode and never removes content, request/run/receipt history, release state, service configuration, credentials, or frozen hooks.
+
+## Release guides
+
+Lanes may optionally configure natural-language release guides in `[lanes.guide]` with `project`, `environment`, and `components` markdown files. Guides provide authoritative release knowledge (procedures, approvals, parameters, and caveats) to agents. Guide contents are loaded into memory snapshots at coordinator startup and verified fail-closed (file existence, regular file, max 32 KiB per file, component name subsets, and secret pattern scanning).
+
+Guides are advisory and **do not** participate in `effective_profile_digest`, idempotency hashing, or frozen request targets. Responses carry SHA-256 digests for callers to audit which version was read.
+
+### `GET /v1/lanes/{id}/guide`
+
+Requires a non-executor bearer token authorized for the lane (same permissions as `GET /v1/lanes/{id}`).
+
+Returns a structured response containing ordered sections:
+- `project`: project-level overview (scope: `"project"`, name: `"project"`)
+- `environment`: environment guidelines (scope: `"environment"`, name: lane environment slug)
+- `component`: component-specific guidelines in declaration order of `lane.components` (scope: `"component"`, name: component slug)
+
+Unconfigured levels are omitted. A lane without configured guides returns empty `sections: []`.
+
+```json
+{
+  "lane_id": "myapp-dev",
+  "project": "myapp",
+  "environment": "dev",
+  "sections": [
+    {"scope": "project",     "name": "project", "content_sha256": "...", "content": "# ..."},
+    {"scope": "environment", "name": "dev",     "content_sha256": "...", "content": "..."},
+    {"scope": "component",   "name": "app",     "content_sha256": "...", "content": "..."}
+  ]
+}
+```
+
+### `GET /v1/guides/{project}`
+
+Aggregates release guides across all lanes belonging to `project` that the authenticated token is authorized to view.
+
+- If the token has no visible lanes for the project, returns HTTP 403 `forbidden` with `{ "code": "forbidden", "message": "...", "retryable": false }`.
+- `overview`: project overview, or `null` if unconfigured.
+- `environments`: environment guides deduplicated by source file path, with merged `lane_ids` containing all visible lanes sharing that file.
+- `components`: component guides deduplicated by source file path.
+
+```json
+{
+  "project": "myapp",
+  "overview": {"content_sha256": "...", "content": "..."},
+  "environments": [{"environment": "dev", "lane_ids": ["myapp-dev"], "content_sha256": "...", "content": "..."}],
+  "components":  [{"component": "app", "content_sha256": "...", "content": "..."}]
+}
+```
 
 ## Log queries
 
