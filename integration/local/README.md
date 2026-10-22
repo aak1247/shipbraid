@@ -22,16 +22,27 @@ configuration interface is:
   "deploy": ["/bin/bash", "/home/user/.local/share/shipbraid/releases/<release>/project/deploy.sh"],
   "verify": ["/usr/bin/python3", "/home/user/.local/share/shipbraid/releases/<release>/project/verify.py"],
   "environment_file": "/home/user/.local/share/shipbraid/etc/deploy.env",
+  "forward_env_prefixes": ["DEPLOY_", "MYAPP_"],
   "verify_timeout_seconds": 10
 }
 ```
 
-`version` defaults to 1, `environment_file` may be null or empty, and
-`verify_timeout_seconds` defaults to 10 and accepts 1–10 seconds. Paths are
-absolute, commands are non-empty argv arrays, and production environments are
-rejected. The dedicated environment file must be a user-owned regular file with
-mode 0600 or stricter. It contains literal `KEY=value` lines (no shell
-expansion); comments and blank lines are ignored.
+`version` defaults to 1, `environment_file` may be null or empty,
+`forward_env_prefixes` defaults to `[]`, and `verify_timeout_seconds` defaults
+to 10 and accepts 1–10 seconds. Paths are absolute, commands are non-empty argv
+arrays, and production environments are rejected. The dedicated environment file
+must be a user-owned regular file with mode 0600 or stricter. It contains
+literal `KEY=value` lines (no shell expansion); comments and blank lines are
+ignored.
+
+When `forward_env_prefixes` is configured, the adapter matches variables from its
+own process environment by prefix and injects them into the systemd worker
+environment, overlaying values onto `environment_file`. Variables must follow the
+same naming and size constraints as `environment_file` (valid identifier up to 64
+characters, value non-empty up to 8 KiB, no reserved system names or `SHIPBRAID_`
+prefixes). Combined with the coordinator's `isolated` hook environment, this allows
+injected credentials to reach deployment scripts without ever appearing in the
+hook envelope JSON or command arguments.
 
 Configure the hooks executor to use the immutable adapter and JSON config with
 fixed arguments, for example:

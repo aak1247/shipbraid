@@ -97,6 +97,7 @@ impl HookExecutor {
     pub async fn call(
         config: &HookConfig,
         envelope: &HookEnvelope<'_>,
+        hook_env: Option<&crate::config::LaneHookEnvironment>,
     ) -> anyhow::Result<HookCall> {
         let call_started_at = Utc::now();
         let input = serde_json::to_vec(envelope).context("serialize hook envelope")?;
@@ -115,6 +116,7 @@ impl HookExecutor {
                 if let Some(cwd) = cwd {
                     command.current_dir(cwd);
                 }
+                apply_hook_environment(&mut command, hook_env);
                 call_process(command, input, *timeout_ms).await?
             }
             HookConfig::Script {
@@ -131,6 +133,7 @@ impl HookExecutor {
                 } else if let Some(parent) = path.parent() {
                     command.current_dir(parent);
                 }
+                apply_hook_environment(&mut command, hook_env);
                 call_process(command, input, *timeout_ms).await?
             }
             HookConfig::Webhook {
@@ -144,6 +147,33 @@ impl HookExecutor {
             HookCall::Reply(reply) => {
                 validate_reply(&reply, envelope, call_started_at, Utc::now())?;
                 Ok(HookCall::Reply(reply))
+            }
+        }
+    }
+}
+
+fn apply_hook_environment(
+    command: &mut Command,
+    hook_env: Option<&crate::config::LaneHookEnvironment>,
+) {
+    let Some(hook_env) = hook_env else {
+        return;
+    };
+    match hook_env.mode {
+        crate::config::HookEnvironmentMode::Inherit => {
+            for (key, val) in &hook_env.credentials {
+                command.env(key, val);
+            }
+        }
+        crate::config::HookEnvironmentMode::Isolated => {
+            command.env_clear();
+            for key in &hook_env.allow {
+                if let Some(val) = std::env::var_os(key) {
+                    command.env(key, val);
+                }
+            }
+            for (key, val) in &hook_env.credentials {
+                command.env(key, val);
             }
         }
     }

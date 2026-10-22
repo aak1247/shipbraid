@@ -67,6 +67,7 @@ where
         if let Some(guide) = &lane.guide {
             guide_checks(guide, &lane_field, &mut checks);
         }
+        hook_environment_and_credential_checks(lane, &lane_field, &mut checks);
     }
 
     if let Some(dashboard_dir) = &config.dashboard_dir {
@@ -509,6 +510,288 @@ fn check_guide_file(path: &Path, field: &str, checks: &mut Vec<Check>) {
     ));
 }
 
+fn hook_environment_and_credential_checks(
+    lane: &crate::config::LaneConfig,
+    lane_field: &str,
+    checks: &mut Vec<Check>,
+) {
+    if lane.executor.kind() != "hooks" {
+        if lane.credentials.is_some() {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                format!("{lane_field}.credentials"),
+                "Credentials cannot be configured for scripted lanes.",
+                "Remove [lanes.credentials] or change executor to 'hooks'.",
+            ));
+        }
+        return;
+    }
+
+    let allow_set: HashSet<&str> = lane
+        .hook_environment
+        .as_ref()
+        .map(|e| e.allow.iter().map(|s| s.as_str()).collect())
+        .unwrap_or_default();
+
+    if let Some(credentials) = &lane.credentials {
+        if credentials.env_files.is_empty() {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Pass,
+                format!("{lane_field}.credentials.env_files"),
+                "No credential files configured.",
+                "No action is needed.",
+            ));
+        } else {
+            let mut all_keys = HashSet::new();
+            let mut total_keys_overflow = false;
+            for (file_idx, path) in credentials.env_files.iter().enumerate() {
+                let field = format!("{lane_field}.credentials.env_files[{file_idx}]");
+                check_credential_file(
+                    path,
+                    &field,
+                    &allow_set,
+                    &mut all_keys,
+                    &mut total_keys_overflow,
+                    checks,
+                );
+            }
+            if total_keys_overflow || all_keys.len() > crate::config::MAX_TOTAL_CREDENTIAL_KEYS {
+                checks.push(Check::new(
+                    "config.credentials_file",
+                    CheckStatus::Fail,
+                    format!("{lane_field}.credentials"),
+                    "Total credential keys across all files exceeds maximum limit.",
+                    "Reduce the total number of credential keys across all files to 32 or fewer.",
+                ));
+            }
+        }
+    }
+
+    let mode = lane
+        .hook_environment
+        .as_ref()
+        .map(|e| e.mode)
+        .unwrap_or(crate::config::HookEnvironmentMode::Inherit);
+
+    match mode {
+        crate::config::HookEnvironmentMode::Isolated => {
+            let mut has_invalid_name = false;
+            let mut seen_allow = HashSet::new();
+            if let Some(env_config) = &lane.hook_environment {
+                for name in &env_config.allow {
+                    if !crate::config::is_valid_env_key(name)
+                        || name.starts_with("SHIPBRAID_")
+                        || !seen_allow.insert(name.as_str())
+                    {
+                        has_invalid_name = true;
+                        break;
+                    }
+                }
+            }
+            if has_invalid_name {
+                checks.push(Check::new(
+                    "config.hook_environment",
+                    CheckStatus::Fail,
+                    format!("{lane_field}.hook_environment.allow"),
+                    "Hook environment allowlist contains invalid, reserved, or duplicate variable names.",
+                    "Ensure allowlist entries are valid environment variable names without 'SHIPBRAID_' prefix.",
+                ));
+            } else {
+                checks.push(Check::new(
+                    "config.hook_environment",
+                    CheckStatus::Pass,
+                    format!("{lane_field}.hook_environment"),
+                    "Configured hook environment is isolated with an allowlist.",
+                    "No action is needed.",
+                ));
+            }
+        }
+        crate::config::HookEnvironmentMode::Inherit => {
+            checks.push(Check::new(
+                "config.hook_environment",
+                CheckStatus::Warn,
+                format!("{lane_field}.hook_environment"),
+                "Hook environment uses 'inherit' mode: hook subprocesses inherit coordinator process environment, which may leak ambient credentials.",
+                "Configure [lanes.hook_environment] with mode = 'isolated' and an explicit allowlist.",
+            ));
+        }
+    }
+}
+
+fn check_credential_file(
+    path: &Path,
+    field: &str,
+    allow_set: &HashSet<&str>,
+    all_keys: &mut HashSet<String>,
+    total_keys_overflow: &mut bool,
+    checks: &mut Vec<Check>,
+) {
+    if !path.is_file() {
+        checks.push(Check::new(
+            "config.credentials_file",
+            CheckStatus::Fail,
+            field,
+            "Configured credential file is missing or not a regular file.",
+            "Provide a readable 0600 regular file at the configured path.",
+        ));
+        return;
+    }
+    let metadata = match fs::metadata(path) {
+        Ok(m) => m,
+        Err(_) => {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file metadata cannot be read.",
+                "Ensure the configured credential file is accessible.",
+            ));
+            return;
+        }
+    };
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file has insecure permissions (must not have group or other permissions).",
+                "Set file permissions to 0600 or stricter (chmod 600).",
+            ));
+            return;
+        }
+    }
+    if metadata.len() > crate::config::MAX_CREDENTIAL_FILE_BYTES {
+        checks.push(Check::new(
+            "config.credentials_file",
+            CheckStatus::Fail,
+            field,
+            "Configured credential file exceeds maximum allowed size of 64 KiB.",
+            "Reduce the credential file size to 64 KiB or less.",
+        ));
+        return;
+    }
+    let content = match fs::read_to_string(path) {
+        Ok(c) => c,
+        Err(_) => {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file is not valid UTF-8.",
+                "Ensure the credential file is encoded as UTF-8.",
+            ));
+            return;
+        }
+    };
+
+    for (line_idx, line) in content.lines().enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            let _ = line_idx;
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains an invalid line missing '='.",
+                "Format lines as KEY=value.",
+            ));
+            return;
+        };
+        if !crate::config::is_valid_env_key(key) {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains an invalid variable name.",
+                "Use valid variable names matching ^[A-Za-z_][A-Za-z0-9_]{0,63}$.",
+            ));
+            return;
+        }
+        if key.starts_with("SHIPBRAID_") {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains a variable with reserved prefix 'SHIPBRAID_'.",
+                "Credential variable names must not start with 'SHIPBRAID_'.",
+            ));
+            return;
+        }
+        if value.is_empty() {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains an empty variable value.",
+                "Credential values must be non-empty.",
+            ));
+            return;
+        }
+        if value.len() > crate::config::MAX_CREDENTIAL_VALUE_BYTES {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains a value exceeding maximum allowed size of 8192 bytes.",
+                "Reduce the credential value length to 8192 bytes or less.",
+            ));
+            return;
+        }
+        if value.contains('\0') {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains a null byte in a value.",
+                "Credential values must not contain null bytes.",
+            ));
+            return;
+        }
+        if allow_set.contains(key) {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential key conflicts with hook_environment.allow list.",
+                "Credential keys must not intersect with the allowlist.",
+            ));
+            return;
+        }
+        if !all_keys.insert(key.to_string()) {
+            checks.push(Check::new(
+                "config.credentials_file",
+                CheckStatus::Fail,
+                field,
+                "Configured credential file contains duplicate key across files.",
+                "Ensure credential keys are unique across all configured environment files.",
+            ));
+            return;
+        }
+    }
+
+    if all_keys.len() > crate::config::MAX_TOTAL_CREDENTIAL_KEYS {
+        *total_keys_overflow = true;
+    }
+
+    checks.push(Check::new(
+        "config.credentials_file",
+        CheckStatus::Pass,
+        field,
+        "Configured credential file is present, has secure permissions, and is valid.",
+        "No action is needed.",
+    ));
+}
+
 #[cfg(test)]
 mod tests {
     use std::{collections::HashMap, ffi::OsString, fs, path::PathBuf};
@@ -541,6 +824,8 @@ mod tests {
             failure_observe,
             resource_admission: None,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         }
     }
 
@@ -901,5 +1186,120 @@ mod tests {
             .find(|c| c.field == "lanes[0].guide.components.non_utf8")
             .unwrap();
         assert!(non_utf8_check.message.contains("not valid UTF-8"));
+    }
+
+    #[test]
+    fn credential_files_and_hook_environments_diagnostics_checks() {
+        let temp = tempfile::tempdir().unwrap();
+        let good_cred = temp.path().join("good.env");
+        fs::write(
+            &good_cred,
+            "API_KEY=secret_canary_value_1234\nDB_PASS=db_secret_5678\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&good_cred, fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let insecure_cred = temp.path().join("insecure.env");
+        fs::write(&insecure_cred, "FOO=bar\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(&insecure_cred, fs::Permissions::from_mode(0o666)).unwrap();
+        }
+
+        let command_hook = HookConfig::Command {
+            program: "/bin/sh".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1000,
+        };
+
+        // 1. Hooks lane with good cred and isolated hook environment
+        let mut lane_isolated = lane_with(
+            LaneExecutorConfig::Hooks {
+                dispatch: command_hook.clone(),
+                observe: command_hook.clone(),
+                verify: command_hook.clone(),
+            },
+            None,
+        );
+        lane_isolated.credentials = Some(crate::config::CredentialsConfig {
+            env_files: vec![good_cred.clone()],
+        });
+        lane_isolated.hook_environment = Some(crate::config::HookEnvironmentConfig {
+            mode: crate::config::HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into(), "HOME".into()],
+        });
+
+        // 2. Hooks lane with insecure cred and inherit mode
+        let mut lane_inherit = lane_with(
+            LaneExecutorConfig::Hooks {
+                dispatch: command_hook.clone(),
+                observe: command_hook.clone(),
+                verify: command_hook,
+            },
+            None,
+        );
+        lane_inherit.credentials = Some(crate::config::CredentialsConfig {
+            env_files: vec![insecure_cred.clone()],
+        });
+
+        // 3. Scripted lane with credentials -> fail
+        let mut lane_scripted = lane_with(LaneExecutorConfig::Scripted, None);
+        lane_scripted.credentials = Some(crate::config::CredentialsConfig {
+            env_files: vec![good_cred.clone()],
+        });
+
+        let config = Config {
+            lanes: vec![lane_isolated, lane_inherit, lane_scripted],
+            ..Config::default()
+        };
+
+        let checks = configuration_checks_with(&config, &|_| Err(VarError::NotPresent), None);
+
+        // Lane 0: good cred passes, isolated environment passes
+        assert_eq!(
+            status_for(&checks, "lanes[0].credentials.env_files[0]"),
+            CheckStatus::Pass
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[0].hook_environment"),
+            CheckStatus::Pass
+        );
+
+        // Lane 1: insecure cred fails (on unix), inherit environment warns
+        #[cfg(unix)]
+        assert_eq!(
+            status_for(&checks, "lanes[1].credentials.env_files[0]"),
+            CheckStatus::Fail
+        );
+        assert_eq!(
+            status_for(&checks, "lanes[1].hook_environment"),
+            CheckStatus::Warn
+        );
+
+        // Lane 2: scripted lane with credentials fails
+        assert_eq!(
+            status_for(&checks, "lanes[2].credentials"),
+            CheckStatus::Fail
+        );
+
+        // Ensure no secret values leak into doctor check messages
+        let report = checks
+            .iter()
+            .map(|check| format!("{} {} {}", check.field, check.message, check.suggestion))
+            .collect::<String>();
+        assert!(
+            !report.contains("secret_canary_value_1234"),
+            "doctor probe must not leak credential value"
+        );
+        assert!(
+            !report.contains("db_secret_5678"),
+            "doctor probe must not leak credential value"
+        );
     }
 }

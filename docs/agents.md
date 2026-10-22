@@ -76,7 +76,7 @@ shipbraid --json system
 shipbraid --json list lane
 ```
 
-`system` 返回 API 版本、`tenant_id`、认证主体与主体能力。通道列出允许的组件、覆盖模式、是否启用、执行器类型和抢占能力；不会暴露镜像路径或凭据。`urgent` 与 `admin` 独立配置，普通 Agent 不需要管理员权限。
+`system` 返回 API 版本、`tenant_id`、认证主体与主体能力。通道列出允许的组件、覆盖模式、是否启用、执行器类型和抢占能力；不会暴露镜像路径或凭据。凭据由管理员在 lane 配置管理，agent/API/请求永远接触不到值。`urgent` 与 `admin` 独立配置，普通 Agent 不需要管理员权限。
 
 ## 提交并等待
 

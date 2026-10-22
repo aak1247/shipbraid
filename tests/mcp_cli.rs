@@ -267,6 +267,8 @@ async fn setup_test_server() -> TestServer {
                 environment: Some(dev_file),
                 components: comp_map,
             }),
+            credentials: None,
+            hook_environment: None,
         },
         LaneConfig {
             id: "lane-two".into(),
@@ -285,6 +287,8 @@ async fn setup_test_server() -> TestServer {
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         },
         LaneConfig {
             id: "lane-disabled".into(),
@@ -303,6 +307,8 @@ async fn setup_test_server() -> TestServer {
             enabled: false,
             executor: LaneExecutorConfig::Scripted,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         },
     ];
 

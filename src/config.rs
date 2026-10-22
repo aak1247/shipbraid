@@ -112,9 +112,74 @@ pub struct LaneConfig {
     /// Optional natural-language release guide for this lane.
     #[serde(default)]
     pub guide: Option<GuideConfig>,
+    /// Optional credentials configuration for hooks lane.
+    #[serde(default)]
+    pub credentials: Option<CredentialsConfig>,
+    /// Optional hook environment configuration.
+    #[serde(default)]
+    pub hook_environment: Option<HookEnvironmentConfig>,
 }
 
 pub const MAX_GUIDE_FILE_BYTES: usize = 32768;
+pub const MAX_CREDENTIAL_FILE_BYTES: u64 = 64 * 1024;
+pub const MAX_CREDENTIAL_VALUE_BYTES: usize = 8192;
+pub const MAX_TOTAL_CREDENTIAL_KEYS: usize = 32;
+
+#[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum HookEnvironmentMode {
+    #[default]
+    Inherit,
+    Isolated,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HookEnvironmentConfig {
+    #[serde(default)]
+    pub mode: HookEnvironmentMode,
+    #[serde(default)]
+    pub allow: Vec<String>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct CredentialsConfig {
+    #[serde(default)]
+    pub env_files: Vec<PathBuf>,
+}
+
+#[derive(Clone, Default, PartialEq, Eq)]
+pub struct LaneHookEnvironment {
+    pub mode: HookEnvironmentMode,
+    pub allow: Vec<String>,
+    pub credentials: BTreeMap<String, String>,
+}
+
+impl std::fmt::Debug for LaneHookEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("LaneHookEnvironment")
+            .field("mode", &self.mode)
+            .field("allow", &self.allow)
+            .field(
+                "credential_keys",
+                &self.credentials.keys().collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+#[derive(Serialize)]
+pub struct NormalizedHookEnvironment<'a> {
+    pub mode: HookEnvironmentMode,
+    pub allow: Vec<&'a str>,
+}
+
+#[derive(Serialize)]
+pub struct CredentialFileDigest {
+    pub path: String,
+    pub content_sha256: String,
+}
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
@@ -251,6 +316,11 @@ impl Config {
                 }
                 for path in guide.components.values_mut() {
                     resolve_path(base, path);
+                }
+            }
+            if let Some(credentials) = &mut lane.credentials {
+                for env_file in &mut credentials.env_files {
+                    resolve_path(base, env_file);
                 }
             }
             if let LaneExecutorConfig::Hooks {
@@ -421,6 +491,7 @@ impl Config {
             if let Some(guide) = &lane.guide {
                 guide.load_snapshot(&lane.id, &lane.components)?;
             }
+            lane.load_hook_environment()?;
         }
         let mut token_ids = std::collections::HashSet::new();
         for token in &self.tokens {
@@ -483,6 +554,53 @@ impl Config {
         if let Some(executor_profile) = executor_profile {
             digest.update([0]);
             digest.update(executor_profile);
+
+            let mode = lane
+                .hook_environment
+                .as_ref()
+                .map(|env| env.mode)
+                .unwrap_or(HookEnvironmentMode::Inherit);
+            let has_allow = lane
+                .hook_environment
+                .as_ref()
+                .is_some_and(|env| !env.allow.is_empty());
+            let has_credentials = lane
+                .credentials
+                .as_ref()
+                .is_some_and(|creds| !creds.env_files.is_empty());
+
+            if mode == HookEnvironmentMode::Isolated || has_allow || has_credentials {
+                let mut allow: Vec<&str> = lane
+                    .hook_environment
+                    .as_ref()
+                    .map(|env| env.allow.iter().map(|s| s.as_str()).collect())
+                    .unwrap_or_default();
+                allow.sort_unstable();
+                allow.dedup();
+                let normalized_hook_env = NormalizedHookEnvironment { mode, allow };
+                let hook_env_bytes = serde_json::to_vec(&normalized_hook_env)
+                    .context("serialize configured hook environment")?;
+                digest.update([0]);
+                digest.update(hook_env_bytes);
+
+                let mut cred_files: Vec<CredentialFileDigest> = Vec::new();
+                if let Some(credentials) = &lane.credentials {
+                    for path in &credentials.env_files {
+                        let bytes = std::fs::read(path).with_context(|| {
+                            format!("cannot read credential file '{}'", path.display())
+                        })?;
+                        cred_files.push(CredentialFileDigest {
+                            path: path.to_string_lossy().to_string(),
+                            content_sha256: hex::encode(Sha256::digest(&bytes)),
+                        });
+                    }
+                }
+                cred_files.sort_by(|a, b| a.path.cmp(&b.path));
+                let cred_bytes = serde_json::to_vec(&cred_files)
+                    .context("serialize configured credential file digests")?;
+                digest.update([0]);
+                digest.update(cred_bytes);
+            }
         }
         if !lane.request_parameters.is_empty() {
             let schema = serde_json::to_vec(&lane.request_parameters)
@@ -504,6 +622,14 @@ impl Config {
             }
         }
         Ok(snapshots)
+    }
+
+    pub fn load_hook_environments(&self) -> Result<BTreeMap<String, LaneHookEnvironment>> {
+        let mut environments = BTreeMap::new();
+        for lane in &self.lanes {
+            environments.insert(lane.id.clone(), lane.load_hook_environment()?);
+        }
+        Ok(environments)
     }
 }
 
@@ -761,6 +887,198 @@ fn has_token_prefix(text: &str, prefix: &str) -> bool {
     false
 }
 
+impl LaneConfig {
+    pub fn load_hook_environment(&self) -> Result<LaneHookEnvironment> {
+        if self.credentials.is_some() && self.executor.kind() != "hooks" {
+            bail!(
+                "credentials can only be configured for hooks lanes: {}",
+                self.id
+            );
+        }
+
+        let mode = self
+            .hook_environment
+            .as_ref()
+            .map(|env| env.mode)
+            .unwrap_or_default();
+
+        let mut allow_set = std::collections::BTreeSet::new();
+        if let Some(env_config) = &self.hook_environment {
+            for name in &env_config.allow {
+                if !is_valid_env_key(name) {
+                    bail!(
+                        "lane '{}' hook_environment.allow has invalid variable name '{}'",
+                        self.id,
+                        name
+                    );
+                }
+                if name.starts_with("SHIPBRAID_") {
+                    bail!(
+                        "lane '{}' hook_environment.allow has reserved prefix variable name '{}'",
+                        self.id,
+                        name
+                    );
+                }
+                if !allow_set.insert(name.clone()) {
+                    bail!(
+                        "lane '{}' hook_environment.allow has duplicate variable name '{}'",
+                        self.id,
+                        name
+                    );
+                }
+            }
+        }
+
+        let mut credentials = BTreeMap::new();
+        if let Some(cred_config) = &self.credentials {
+            for path in &cred_config.env_files {
+                load_credential_file(&self.id, path, &allow_set, &mut credentials)?;
+            }
+            if credentials.len() > MAX_TOTAL_CREDENTIAL_KEYS {
+                bail!(
+                    "lane '{}' total credential keys ({}) exceeds limit of {}",
+                    self.id,
+                    credentials.len(),
+                    MAX_TOTAL_CREDENTIAL_KEYS
+                );
+            }
+        }
+
+        let allow = self
+            .hook_environment
+            .as_ref()
+            .map(|env| env.allow.clone())
+            .unwrap_or_default();
+
+        Ok(LaneHookEnvironment {
+            mode,
+            allow,
+            credentials,
+        })
+    }
+}
+
+pub fn is_valid_env_key(key: &str) -> bool {
+    if key.is_empty() || key.len() > 64 {
+        return false;
+    }
+    let mut chars = key.chars();
+    match chars.next() {
+        Some(c) if c.is_ascii_alphabetic() || c == '_' => {}
+        _ => return false,
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
+fn load_credential_file(
+    lane_id: &str,
+    path: &Path,
+    allow_set: &std::collections::BTreeSet<String>,
+    all_keys: &mut BTreeMap<String, String>,
+) -> Result<()> {
+    if !path.is_file() {
+        bail!(
+            "lane '{lane_id}' credential file '{}' does not exist or is not a regular file",
+            path.display()
+        );
+    }
+    let metadata = path.metadata().with_context(|| {
+        format!(
+            "cannot read metadata of credential file '{}'",
+            path.display()
+        )
+    })?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = metadata.permissions().mode();
+        if mode & 0o077 != 0 {
+            bail!(
+                "lane '{lane_id}' credential file '{}' has insecure permissions {:04o} (group/other permissions must not be set)",
+                path.display(),
+                mode & 0o777
+            );
+        }
+    }
+    if metadata.len() > MAX_CREDENTIAL_FILE_BYTES {
+        bail!(
+            "lane '{lane_id}' credential file '{}' exceeds maximum allowed size of {} bytes",
+            path.display(),
+            MAX_CREDENTIAL_FILE_BYTES
+        );
+    }
+    let content = std::fs::read_to_string(path)
+        .with_context(|| format!("cannot read credential file '{}'", path.display()))?;
+    for (line_idx, line) in content.lines().enumerate() {
+        let line = line.strip_suffix('\r').unwrap_or(line);
+        let trimmed = line.trim();
+        if trimmed.is_empty() || trimmed.starts_with('#') {
+            continue;
+        }
+        let Some((key, value)) = line.split_once('=') else {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} is invalid (missing '=')",
+                path.display(),
+                line_idx + 1
+            );
+        };
+        if !is_valid_env_key(key) {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} has invalid key '{}'",
+                path.display(),
+                line_idx + 1,
+                key
+            );
+        }
+        if key.starts_with("SHIPBRAID_") {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} has reserved key prefix 'SHIPBRAID_': '{}'",
+                path.display(),
+                line_idx + 1,
+                key
+            );
+        }
+        if value.is_empty() {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} has empty value for key '{}'",
+                path.display(),
+                line_idx + 1,
+                key
+            );
+        }
+        if value.len() > MAX_CREDENTIAL_VALUE_BYTES {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} value for key '{}' exceeds maximum allowed size of {} bytes",
+                path.display(),
+                line_idx + 1,
+                key,
+                MAX_CREDENTIAL_VALUE_BYTES
+            );
+        }
+        if value.contains('\0') {
+            bail!(
+                "lane '{lane_id}' credential file '{}' line {} value for key '{}' contains null byte",
+                path.display(),
+                line_idx + 1,
+                key
+            );
+        }
+        if allow_set.contains(key) {
+            bail!(
+                "lane '{lane_id}' credential key '{}' conflicts with hook_environment.allow list",
+                key
+            );
+        }
+        if all_keys
+            .insert(key.to_string(), value.to_string())
+            .is_some()
+        {
+            bail!("lane '{lane_id}' duplicate credential key '{}'", key);
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -783,6 +1101,8 @@ mod tests {
             failure_observe: None,
             resource_admission: None,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         }
     }
 
@@ -1206,6 +1526,8 @@ mod tests {
             failure_observe: None,
             resource_admission: None,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         };
 
         let mut lane_with_guide = lane_without_guide.clone();
@@ -1544,5 +1866,603 @@ mod tests {
         lane.guide = None;
         let d5 = config.effective_profile_digest(&lane).unwrap();
         assert_eq!(d0, d5, "returning to guide None must preserve digest");
+    }
+
+    #[test]
+    fn credential_env_files_validation_matrix() {
+        let temp = tempfile::tempdir().unwrap();
+        let good_file = temp.path().join("good.env");
+        std::fs::write(
+            &good_file,
+            "# Comment line\n\nVALID_KEY_1=my-value\nVALID_KEY_2=another=value_with_equals\r\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&good_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let cmd_hook = HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1_000,
+        };
+
+        let mut hook_lane = local_lane("dev", "p", temp.path());
+        hook_lane.executor = LaneExecutorConfig::Hooks {
+            dispatch: cmd_hook.clone(),
+            observe: cmd_hook.clone(),
+            verify: cmd_hook,
+        };
+        hook_lane.credentials = Some(CredentialsConfig {
+            env_files: vec![good_file.clone()],
+        });
+        hook_lane.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into(), "HOME".into()],
+        });
+
+        // 1. Good lane passes
+        assert!(hook_lane.load_hook_environment().is_ok());
+
+        // 2. Credentials on scripted lane fails
+        let mut scripted_lane = local_lane("scripted", "p", temp.path());
+        scripted_lane.credentials = Some(CredentialsConfig {
+            env_files: vec![good_file.clone()],
+        });
+        let err = scripted_lane
+            .load_hook_environment()
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("credentials can only be configured for hooks lanes"),
+            "actual: {err}"
+        );
+
+        // 3. Insecure file permissions (unix only)
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let insecure_file = temp.path().join("insecure.env");
+            std::fs::write(&insecure_file, "FOO=bar\n").unwrap();
+            std::fs::set_permissions(&insecure_file, std::fs::Permissions::from_mode(0o644))
+                .unwrap();
+            let mut lane = hook_lane.clone();
+            lane.credentials = Some(CredentialsConfig {
+                env_files: vec![insecure_file],
+            });
+            let err = lane.load_hook_environment().unwrap_err().to_string();
+            assert!(err.contains("insecure permissions"), "actual: {err}");
+        }
+
+        // 4. File size boundary: > 64 KiB
+        let oversized_file = temp.path().join("oversized.env");
+        std::fs::write(
+            &oversized_file,
+            vec![b'a'; (MAX_CREDENTIAL_FILE_BYTES + 1) as usize],
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&oversized_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![oversized_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum allowed size of 65536 bytes"),
+            "actual: {err}"
+        );
+
+        // 5. Empty value
+        let empty_val_file = temp.path().join("empty_val.env");
+        std::fs::write(&empty_val_file, "KEY=\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&empty_val_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![empty_val_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(err.contains("has empty value for key"), "actual: {err}");
+
+        // 6. Value exceeding 8 KiB
+        let large_val_file = temp.path().join("large_val.env");
+        let large_val = "x".repeat(MAX_CREDENTIAL_VALUE_BYTES + 1);
+        std::fs::write(&large_val_file, format!("KEY={large_val}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&large_val_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![large_val_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(
+            err.contains("exceeds maximum allowed size of 8192 bytes"),
+            "actual: {err}"
+        );
+
+        // 7. Invalid key name syntax
+        for bad_key in ["1STARTS_DIGIT", "HAS-HYPHEN", "HAS.DOT", "HAS SPACE"] {
+            let bad_key_file = temp.path().join(format!("bad_{bad_key}.env"));
+            std::fs::write(&bad_key_file, format!("{bad_key}=val\n")).unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(&bad_key_file, std::fs::Permissions::from_mode(0o600))
+                    .unwrap();
+            }
+            let mut lane = hook_lane.clone();
+            lane.credentials = Some(CredentialsConfig {
+                env_files: vec![bad_key_file],
+            });
+            let err = lane.load_hook_environment().unwrap_err().to_string();
+            assert!(err.contains("has invalid key"), "actual: {err}");
+        }
+
+        // 8. Reserved prefix SHIPBRAID_
+        let reserved_key_file = temp.path().join("reserved.env");
+        std::fs::write(&reserved_key_file, "SHIPBRAID_TOKEN=leaked\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&reserved_key_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![reserved_key_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(
+            err.contains("has reserved key prefix 'SHIPBRAID_'"),
+            "actual: {err}"
+        );
+
+        // 9. Allowlist intersection conflict
+        let conflict_file = temp.path().join("conflict.env");
+        std::fs::write(&conflict_file, "PATH=/some/path\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&conflict_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into()],
+        });
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![conflict_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(
+            err.contains("conflicts with hook_environment.allow list"),
+            "actual: {err}"
+        );
+
+        // 10. Duplicate key across multiple files
+        let file_a = temp.path().join("file_a.env");
+        let file_b = temp.path().join("file_b.env");
+        std::fs::write(&file_a, "SHARED_KEY=val1\n").unwrap();
+        std::fs::write(&file_b, "SHARED_KEY=val2\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_a, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&file_b, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![file_a, file_b],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(
+            err.contains("duplicate credential key 'SHARED_KEY'"),
+            "actual: {err}"
+        );
+
+        // 11. Total keys across all files exceeds 32
+        let file_33_keys = temp.path().join("keys_33.env");
+        let mut content = String::new();
+        for i in 0..=32 {
+            content.push_str(&format!("KEY_{i}=val_{i}\n"));
+        }
+        std::fs::write(&file_33_keys, content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_33_keys, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![file_33_keys],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(err.contains("exceeds limit of 32"), "actual: {err}");
+
+        // 12. Invalid allow entries (reserved prefix, duplicate, invalid format)
+        let mut lane = hook_lane.clone();
+        lane.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["SHIPBRAID_CANARY".into()],
+        });
+        assert!(lane.load_hook_environment().is_err());
+
+        lane.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into(), "PATH".into()],
+        });
+        assert!(lane.load_hook_environment().is_err());
+
+        lane.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["BAD-KEY".into()],
+        });
+        assert!(lane.load_hook_environment().is_err());
+    }
+
+    #[test]
+    fn effective_profile_digest_variation_matrix() {
+        let temp = tempfile::tempdir().unwrap();
+        let file1 = temp.path().join("cred1.env");
+        let file2 = temp.path().join("cred2.env");
+        std::fs::write(&file1, "FOO=initial_foo_value\n").unwrap();
+        std::fs::write(&file2, "BAR=initial_bar_value\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file1, std::fs::Permissions::from_mode(0o600)).unwrap();
+            std::fs::set_permissions(&file2, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let cmd_hook = HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1_000,
+        };
+
+        let mut base_lane = local_lane("test-lane", "p", temp.path());
+        base_lane.executor = LaneExecutorConfig::Hooks {
+            dispatch: cmd_hook.clone(),
+            observe: cmd_hook.clone(),
+            verify: cmd_hook,
+        };
+
+        let config = Config::default();
+
+        // Baseline (mode: inherit, allow: [], credentials: None)
+        let d_baseline = config.effective_profile_digest(&base_lane).unwrap();
+
+        // 1. Repeated calls without config or file changes produce identical digest
+        let d_repeat = config.effective_profile_digest(&base_lane).unwrap();
+        assert_eq!(
+            d_baseline, d_repeat,
+            "profile digest must be invariant across repeated read calls"
+        );
+
+        // 2. Mode variation: inherit -> isolated changes digest
+        let mut lane_isolated = base_lane.clone();
+        lane_isolated.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec![],
+        });
+        let d_isolated = config.effective_profile_digest(&lane_isolated).unwrap();
+        assert_ne!(
+            d_baseline, d_isolated,
+            "changing mode from inherit to isolated must change digest"
+        );
+
+        // 3. Allow variation: [] -> ["PATH"] changes digest
+        let mut lane_allow = lane_isolated.clone();
+        lane_allow.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into()],
+        });
+        let d_allow = config.effective_profile_digest(&lane_allow).unwrap();
+        assert_ne!(
+            d_isolated, d_allow,
+            "changing allow list must change digest"
+        );
+
+        // 4. Allow sort invariance: ["PATH", "HOME"] vs ["HOME", "PATH"] produces identical digest
+        let mut lane_allow_order1 = lane_isolated.clone();
+        lane_allow_order1.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["PATH".into(), "HOME".into()],
+        });
+        let mut lane_allow_order2 = lane_isolated.clone();
+        lane_allow_order2.hook_environment = Some(HookEnvironmentConfig {
+            mode: HookEnvironmentMode::Isolated,
+            allow: vec!["HOME".into(), "PATH".into()],
+        });
+        assert_eq!(
+            config.effective_profile_digest(&lane_allow_order1).unwrap(),
+            config.effective_profile_digest(&lane_allow_order2).unwrap(),
+            "allow list ordering must not affect normalized digest"
+        );
+
+        // 5. File set variation: [] -> [file1] changes digest
+        let mut lane_with_file = lane_allow.clone();
+        lane_with_file.credentials = Some(CredentialsConfig {
+            env_files: vec![file1.clone()],
+        });
+        let d_with_file = config.effective_profile_digest(&lane_with_file).unwrap();
+        assert_ne!(
+            d_allow, d_with_file,
+            "adding credential file must change digest"
+        );
+
+        // 6. Adding another file: [file1] -> [file1, file2] changes digest
+        let mut lane_with_two_files = lane_with_file.clone();
+        lane_with_two_files.credentials = Some(CredentialsConfig {
+            env_files: vec![file1.clone(), file2.clone()],
+        });
+        let d_two_files = config
+            .effective_profile_digest(&lane_with_two_files)
+            .unwrap();
+        assert_ne!(
+            d_with_file, d_two_files,
+            "adding second credential file must change digest"
+        );
+
+        // 7. File path sort invariance: [file1, file2] vs [file2, file1] produces identical digest
+        let mut lane_two_files_rev = lane_with_file.clone();
+        lane_two_files_rev.credentials = Some(CredentialsConfig {
+            env_files: vec![file2.clone(), file1.clone()],
+        });
+        assert_eq!(
+            d_two_files,
+            config
+                .effective_profile_digest(&lane_two_files_rev)
+                .unwrap(),
+            "credential file list ordering must not affect normalized digest"
+        );
+
+        // 8. File content variation: mutating file1 on disk changes digest
+        std::fs::write(&file1, "FOO=mutated_foo_value\n").unwrap();
+        let d_after_mutation = config.effective_profile_digest(&lane_with_file).unwrap();
+        assert_ne!(
+            d_with_file, d_after_mutation,
+            "mutating credential file content on disk must change digest"
+        );
+    }
+
+    #[test]
+    fn credential_env_files_comprehensive_parsing_and_boundary_checks() {
+        let temp = tempfile::tempdir().unwrap();
+
+        let cmd_hook = HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1_000,
+        };
+
+        let mut hook_lane = local_lane("dev-boundaries", "p", temp.path());
+        hook_lane.executor = LaneExecutorConfig::Hooks {
+            dispatch: cmd_hook.clone(),
+            observe: cmd_hook.clone(),
+            verify: cmd_hook,
+        };
+
+        // 1. Parsing details: \r stripping, # comments, empty lines, multiple '=' preserved
+        let parse_file = temp.path().join("parse_test.env");
+        std::fs::write(
+            &parse_file,
+            "# Heading comment\n\n   \nSTRIPPED_CR=value_with_cr\r\n# Mid comment\nMULTI_EQUALS=part1=part2=part3\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&parse_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![parse_file],
+        });
+        let env = lane.load_hook_environment().unwrap();
+        assert_eq!(
+            env.credentials.get("STRIPPED_CR"),
+            Some(&"value_with_cr".to_string()),
+            "\\r must be cleanly stripped from line ending"
+        );
+        assert_eq!(
+            env.credentials.get("MULTI_EQUALS"),
+            Some(&"part1=part2=part3".to_string()),
+            "multiple equals signs in value must be preserved as literal"
+        );
+        assert_eq!(
+            env.credentials.len(),
+            2,
+            "comments and empty lines must be ignored"
+        );
+
+        // 2. Exact boundary: single file exactly 64 KiB (65536 bytes) passes
+        let exact_64k_file = temp.path().join("exact_64k.env");
+        // Create 1 key (<= 32 limit) with comment padding to reach exactly 65536 bytes
+        let mut exact_64k_content = String::with_capacity(MAX_CREDENTIAL_FILE_BYTES as usize);
+        exact_64k_content.push_str("KEY=val\n");
+        let remaining = (MAX_CREDENTIAL_FILE_BYTES as usize) - exact_64k_content.len();
+        // "# " (2) + (remaining - 3) + "\n" (1) = remaining
+        let full_comment = format!("# {}\n", "x".repeat(remaining - 3));
+        exact_64k_content.push_str(&full_comment);
+        assert_eq!(exact_64k_content.len(), MAX_CREDENTIAL_FILE_BYTES as usize);
+        std::fs::write(&exact_64k_file, &exact_64k_content).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exact_64k_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![exact_64k_file],
+        });
+        assert!(
+            lane.load_hook_environment().is_ok(),
+            "credential file of exactly 64 KiB must be accepted"
+        );
+
+        // 3. Exact boundary: value exactly 8192 bytes passes
+        let exact_8k_val_file = temp.path().join("exact_8k_val.env");
+        let exact_val = "v".repeat(MAX_CREDENTIAL_VALUE_BYTES);
+        std::fs::write(&exact_8k_val_file, format!("MAX_VAL_KEY={exact_val}\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&exact_8k_val_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![exact_8k_val_file],
+        });
+        assert!(
+            lane.load_hook_environment().is_ok(),
+            "credential value of exactly 8192 bytes must be accepted"
+        );
+
+        // 4. Exact boundary: exactly 32 keys across files passes
+        let file_32_keys = temp.path().join("keys_32.env");
+        let mut content_32 = String::new();
+        for i in 0..32 {
+            content_32.push_str(&format!("KEY_{i:02}=val\n"));
+        }
+        std::fs::write(&file_32_keys, content_32).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&file_32_keys, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![file_32_keys],
+        });
+        let env_32 = lane.load_hook_environment().unwrap();
+        assert_eq!(
+            env_32.credentials.len(),
+            32,
+            "exactly 32 credential keys must be accepted"
+        );
+
+        // 5. Valid key length boundary: 64-char key accepted, 65-char key rejected
+        let key_64 = "A".repeat(64);
+        let key_65 = "A".repeat(65);
+        let key_len_file = temp.path().join("key_len.env");
+        std::fs::write(&key_len_file, format!("{key_64}=val\n")).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&key_len_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![key_len_file.clone()],
+        });
+        assert!(
+            lane.load_hook_environment().is_ok(),
+            "64-character environment key must be accepted"
+        );
+
+        std::fs::write(&key_len_file, format!("{key_65}=val\n")).unwrap();
+        assert!(
+            lane.load_hook_environment().is_err(),
+            "65-character environment key must be rejected"
+        );
+
+        // 6. File not found rejected
+        let non_existent = temp.path().join("does_not_exist.env");
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![non_existent],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(err.contains("does not exist or is not a regular file"));
+
+        // 7. Directory as credential file rejected
+        let dir_target = temp.path().join("a_directory");
+        std::fs::create_dir(&dir_target).unwrap();
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![dir_target],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(err.contains("does not exist or is not a regular file"));
+
+        // 8. Null byte in credential value rejected
+        let null_byte_file = temp.path().join("null_byte.env");
+        std::fs::write(&null_byte_file, b"KEY_WITH_NULL=bad\x00val\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&null_byte_file, std::fs::Permissions::from_mode(0o600))
+                .unwrap();
+        }
+        let mut lane = hook_lane.clone();
+        lane.credentials = Some(CredentialsConfig {
+            env_files: vec![null_byte_file],
+        });
+        let err = lane.load_hook_environment().unwrap_err().to_string();
+        assert!(err.contains("contains null byte"));
+    }
+
+    #[test]
+    fn legacy_lane_without_credentials_or_hook_env_preserves_pre_upgrade_digest() {
+        let temp = tempfile::tempdir().unwrap();
+        let cmd_hook = HookConfig::Command {
+            program: "/bin/true".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 1_000,
+        };
+        let mut lane = local_lane("legacy-lane", "p", temp.path());
+        lane.executor = LaneExecutorConfig::Hooks {
+            dispatch: cmd_hook.clone(),
+            observe: cmd_hook.clone(),
+            verify: cmd_hook,
+        };
+        lane.credentials = None;
+        lane.hook_environment = None;
+
+        let config = Config::default();
+        let actual_digest = config.effective_profile_digest(&lane).unwrap();
+
+        // Pre-upgrade algorithm (before F3):
+        // Sha256(lane.profile_digest + [0] + serialized_executor)
+        let mut legacy_hasher = Sha256::new();
+        legacy_hasher.update(lane.profile_digest.as_bytes());
+        legacy_hasher.update([0]);
+        legacy_hasher.update(serde_json::to_vec(&lane.executor).unwrap());
+        let expected_legacy = hex::encode(legacy_hasher.finalize());
+
+        // Backward compatibility assertion:
+        // Design §4 and §9 F3 mandate that legacy lanes without credentials or hook_environment
+        // retain the byte-for-byte identical profile digest to prevent fingerprint drift
+        // and broken frozen run verification.
+        assert_eq!(
+            actual_digest, expected_legacy,
+            "存量 hooks lane (无 credentials 无 hook_environment) 的 profile digest 必须与升级前算法结果一致，防止存量配置指纹漂移破坏冻结语义"
+        );
     }
 }

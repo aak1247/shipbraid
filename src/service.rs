@@ -186,6 +186,7 @@ pub struct Service {
     lane_executors: BTreeMap<String, LaneExecutorConfig>,
     resource_roots: Vec<ResourceRootConfig>,
     lane_guides: BTreeMap<String, LaneGuideSnapshot>,
+    lane_hook_environments: BTreeMap<String, crate::config::LaneHookEnvironment>,
     _database_lock: DatabaseLock,
     ready: AtomicBool,
 }
@@ -196,6 +197,9 @@ impl Service {
             .validate()
             .context("validate coordinator configuration")?;
         let lane_guides = config.load_guides().context("load lane guides")?;
+        let lane_hook_environments = config
+            .load_hook_environments()
+            .context("load lane credentials and hook environments")?;
         let tokens = config.resolve_tokens().context("resolve API credentials")?;
         let database_path = canonical_database_path(&config.database_path)?;
         let database_lock = acquire_database_lock(&database_path)?;
@@ -413,6 +417,7 @@ impl Service {
                 .collect(),
             resource_roots,
             lane_guides,
+            lane_hook_environments,
             _database_lock: database_lock,
             ready: AtomicBool::new(true),
         });
@@ -425,6 +430,13 @@ impl Service {
 
     pub fn lane_guide(&self, lane_id: &str) -> Option<&LaneGuideSnapshot> {
         self.lane_guides.get(lane_id)
+    }
+
+    pub fn lane_hook_environment(
+        &self,
+        lane_id: &str,
+    ) -> Option<&crate::config::LaneHookEnvironment> {
+        self.lane_hook_environments.get(lane_id)
     }
 
     pub fn lane_declared_components(&self, lane_id: &str) -> Option<&[String]> {
@@ -1868,7 +1880,8 @@ impl Service {
             run: &run,
             lane: &lane,
         };
-        match HookExecutor::call(&config, &envelope).await {
+        let hook_env = self.lane_hook_environments.get(&run.lane_id);
+        match HookExecutor::call(&config, &envelope, hook_env).await {
             Ok(HookCall::Accepted) => Ok(()),
             Ok(HookCall::Reply(reply)) => {
                 self.apply_hook_reply(operation, Some(&command), &run, *reply)
@@ -1939,7 +1952,8 @@ impl Service {
                 run: &current,
                 lane: &lane,
             };
-            match HookExecutor::call(&config, &envelope).await {
+            let hook_env = self.lane_hook_environments.get(&current.lane_id);
+            match HookExecutor::call(&config, &envelope, hook_env).await {
                 Ok(HookCall::Accepted) => {}
                 Ok(HookCall::Reply(reply)) => {
                     let completed = reply.status == HookStatus::Completed;
@@ -2008,7 +2022,8 @@ impl Service {
             run: &run,
             lane: &lane,
         };
-        match HookExecutor::call(&config, &envelope).await {
+        let hook_env = self.lane_hook_environments.get(&run.lane_id);
+        match HookExecutor::call(&config, &envelope, hook_env).await {
             Ok(HookCall::Accepted) => Ok(()),
             Ok(HookCall::Reply(reply)) => {
                 self.apply_hook_reply(HookOperation::Verify, Some(&command), &run, *reply)
@@ -2476,7 +2491,9 @@ impl Service {
             run: current,
             lane,
         };
-        let Ok(HookCall::Reply(mut reply)) = HookExecutor::call(&config, &envelope).await else {
+        let hook_env = self.lane_hook_environments.get(&current.lane_id);
+        let Ok(HookCall::Reply(mut reply)) = HookExecutor::call(&config, &envelope, hook_env).await
+        else {
             return Ok(false);
         };
         if reply.status != HookStatus::Failed || reply.failure_proof.is_none() {
@@ -2530,7 +2547,8 @@ impl Service {
             run,
             lane,
         };
-        let HookCall::Reply(reply) = HookExecutor::call(&config, &envelope)
+        let hook_env = self.lane_hook_environments.get(&lane.id);
+        let HookCall::Reply(reply) = HookExecutor::call(&config, &envelope, hook_env)
             .await
             .map_err(|_| ServiceError::UnprovenExecutorState)?
         else {
@@ -2985,6 +3003,8 @@ mod tests {
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
                 guide: None,
+                credentials: None,
+                hook_environment: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
@@ -3071,6 +3091,8 @@ mod tests {
                     reservation_bytes: 1024,
                 }),
                 guide: None,
+                credentials: None,
+                hook_environment: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
@@ -3298,6 +3320,8 @@ print(json.dumps(reply))
                     verify: hook,
                 },
                 guide: None,
+                credentials: None,
+                hook_environment: None,
             }],
             max_active_runs: 1,
             tick_ms: 1_000,
@@ -3979,5 +4003,595 @@ print(json.dumps(reply))
             .find(|e| e.kind == "lane_unpaused" && e.lane_id == "test-lane")
             .unwrap();
         assert_eq!(event.actor.as_deref(), Some("operator-alice"));
+    }
+
+    #[tokio::test]
+    async fn isolated_hook_environment_prevents_coordinator_environment_leak() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        // Set process environment variables
+        let marker_name = format!("SHIPBRAID_TEST_MARKER_{}", Uuid::new_v4().simple());
+        let marker_val = "secret_coordinator_agent_token_value_xyz";
+        let unwhitelisted_name = format!("AMBIENT_UNWHITELISTED_{}", Uuid::new_v4().simple());
+        let unwhitelisted_val = "ambient_env_secret_123";
+        let whitelisted_name = format!("WHITELISTED_VAR_{}", Uuid::new_v4().simple());
+        let whitelisted_val = "whitelisted_value_abc";
+
+        unsafe {
+            std::env::set_var(&marker_name, marker_val);
+            std::env::set_var(&unwhitelisted_name, unwhitelisted_val);
+            std::env::set_var(&whitelisted_name, whitelisted_val);
+        }
+
+        // Create credentials file
+        let cred_file = temp.path().join("creds.env");
+        std::fs::write(&cred_file, "INJECTED_CREDENTIAL=credential_secret_999\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cred_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let assert_file = temp.path().join("hook_env_assertions.json");
+
+        // Python script asserts os.environ
+        let script = temp.path().join("isolated_hook.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import datetime, json, os, sys, uuid
+request = json.load(sys.stdin)
+run = request['run']
+operation = request['operation']
+executor_ref = 'fixture:' + run['id']
+
+marker_name = {marker_name:?}
+unwhitelisted_name = {unwhitelisted_name:?}
+whitelisted_name = {whitelisted_name:?}
+assert_path = {assert_path:?}
+
+# Assertions:
+assert marker_name not in os.environ, f"marker token {{marker_name}} leaked into isolated hook!"
+assert unwhitelisted_name not in os.environ, f"unwhitelisted var {{unwhitelisted_name}} leaked into isolated hook!"
+assert os.environ.get(whitelisted_name) == {whitelisted_val:?}, f"whitelisted var missing or wrong: {{os.environ.get(whitelisted_name)}}"
+assert os.environ.get("INJECTED_CREDENTIAL") == "credential_secret_999", f"injected credential missing or wrong: {{os.environ.get('INJECTED_CREDENTIAL')}}"
+
+with open(assert_path, 'w', encoding='utf-8') as f:
+    json.dump({{'verified': True, 'operation': operation}}, f)
+
+reply = {{'version': 1, 'run_id': run['id'], 'generation': run['generation'], 'executor_ref': executor_ref, 'status': 'started', 'logs': []}}
+if operation == 'dispatch':
+    reply['status'] = 'started'
+elif operation == 'observe':
+    reply['status'] = 'completed'
+elif operation == 'verify':
+    reply['status'] = 'verified'
+    reply['receipt'] = {{
+        'id': str(uuid.uuid4()),
+        'run_id': run['id'],
+        'generation': run['generation'],
+        'observed_at': datetime.datetime.now(datetime.timezone.utc).isoformat(),
+        'source_revision': run['target']['revision'],
+        'component_digests': {{component: 'fixture-digest' for component in run['target']['components']}},
+        'profile_digest': run['target']['profile_digest'],
+        'verification_report': 'isolated environment verification passed',
+        'result': 'success'
+    }}
+print(json.dumps(reply))
+"#,
+                marker_name = marker_name,
+                unwhitelisted_name = unwhitelisted_name,
+                whitelisted_name = whitelisted_name,
+                whitelisted_val = whitelisted_val,
+                assert_path = assert_file.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let hook = HookConfig::Script {
+            path: script,
+            interpreter: "python3".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 10_000,
+        };
+
+        let token_env = format!("SHIPBRAID_ADMIN_TOKEN_{}", Uuid::new_v4().simple());
+        let token_val = "isolated-test-admin-token-32-chars-long";
+        unsafe { std::env::set_var(&token_env, token_val) };
+
+        let config = Config {
+            mode: ConfigMode::Server,
+            database_path: temp.path().join("ledger.sqlite3"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["test-lane".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "test-lane".into(),
+                project: "test-project".into(),
+                environment: "dev".into(),
+                repository_id: "test-repo".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "p1".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                failure_observe: None,
+                resource_admission: None,
+                request_parameters: BTreeMap::new(),
+                enabled: true,
+                executor: LaneExecutorConfig::Hooks {
+                    dispatch: hook.clone(),
+                    observe: hook.clone(),
+                    verify: hook,
+                },
+                guide: None,
+                credentials: Some(crate::config::CredentialsConfig {
+                    env_files: vec![cred_file],
+                }),
+                hook_environment: Some(crate::config::HookEnvironmentConfig {
+                    mode: crate::config::HookEnvironmentMode::Isolated,
+                    allow: vec![whitelisted_name.clone(), "PATH".into()],
+                }),
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+            artifacts_dir: None,
+            resource_roots: vec![],
+        };
+
+        let service = Service::open(config).await.unwrap();
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.runs[&run_id].state, RunState::Running);
+
+        // Verify that the hook script ran and passed all assertions
+        assert!(assert_file.is_file(), "hook assertion file was written");
+        let assert_content: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&assert_file).unwrap()).unwrap();
+        assert_eq!(assert_content["verified"], true);
+
+        // Clean up environment variables
+        unsafe {
+            std::env::remove_var(&marker_name);
+            std::env::remove_var(&unwhitelisted_name);
+            std::env::remove_var(&whitelisted_name);
+            std::env::remove_var(&token_env);
+        }
+    }
+
+    #[tokio::test]
+    async fn inherit_mode_preserves_ambient_environment_for_backwards_compatibility() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let ambient_name = format!("AMBIENT_INHERIT_TEST_{}", Uuid::new_v4().simple());
+        let ambient_val = "ambient_inherited_value";
+        unsafe { std::env::set_var(&ambient_name, ambient_val) };
+
+        let assert_file = temp.path().join("inherit_assertions.json");
+
+        let script = temp.path().join("inherit_hook.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import datetime, json, os, sys, uuid
+request = json.load(sys.stdin)
+run = request['run']
+operation = request['operation']
+executor_ref = 'fixture:' + run['id']
+
+ambient_name = {ambient_name:?}
+assert_path = {assert_path:?}
+
+# In inherit mode, ambient process environment IS visible
+assert os.environ.get(ambient_name) == {ambient_val:?}, f"expected ambient env var in inherit mode!"
+
+with open(assert_path, 'w', encoding='utf-8') as f:
+    json.dump({{'verified': True}}, f)
+
+reply = {{'version': 1, 'run_id': run['id'], 'generation': run['generation'], 'executor_ref': executor_ref, 'status': 'started', 'logs': []}}
+print(json.dumps(reply))
+"#,
+                ambient_name = ambient_name,
+                ambient_val = ambient_val,
+                assert_path = assert_file.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let hook = HookConfig::Script {
+            path: script,
+            interpreter: "python3".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 10_000,
+        };
+
+        let token_env = format!("SHIPBRAID_INHERIT_TOKEN_{}", Uuid::new_v4().simple());
+        let token_val = "inherit-test-admin-token-32-chars-long";
+        unsafe { std::env::set_var(&token_env, token_val) };
+
+        // Lane with NO hook_environment specified (defaults to inherit)
+        let config = Config {
+            mode: ConfigMode::Server,
+            database_path: temp.path().join("ledger.sqlite3"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["test-lane".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "test-lane".into(),
+                project: "test-project".into(),
+                environment: "dev".into(),
+                repository_id: "test-repo".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "p1".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                failure_observe: None,
+                resource_admission: None,
+                request_parameters: BTreeMap::new(),
+                enabled: true,
+                executor: LaneExecutorConfig::Hooks {
+                    dispatch: hook.clone(),
+                    observe: hook.clone(),
+                    verify: hook,
+                },
+                guide: None,
+                credentials: None,
+                hook_environment: None,
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+            artifacts_dir: None,
+            resource_roots: vec![],
+        };
+
+        let service = Service::open(config).await.unwrap();
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.runs[&run_id].state, RunState::Running);
+        assert!(
+            assert_file.is_file(),
+            "inherit hook assertion file was written"
+        );
+
+        unsafe {
+            std::env::remove_var(&ambient_name);
+            std::env::remove_var(&token_env);
+        }
+    }
+
+    #[tokio::test]
+    async fn inherit_mode_with_credentials_injects_credentials_and_retains_ambient_env() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let ambient_name = format!("AMBIENT_INHERIT_CRED_{}", Uuid::new_v4().simple());
+        let ambient_val = "ambient_env_val_xyz";
+        unsafe { std::env::set_var(&ambient_name, ambient_val) };
+
+        // Create credentials file
+        let cred_file = temp.path().join("inherit_creds.env");
+        std::fs::write(&cred_file, "INJECTED_INHERIT_CRED=cred_secret_val_789\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cred_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let assert_file = temp.path().join("inherit_cred_assertions.json");
+
+        let script = temp.path().join("inherit_cred_hook.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import datetime, json, os, sys, uuid
+request = json.load(sys.stdin)
+run = request['run']
+operation = request['operation']
+executor_ref = 'fixture:' + run['id']
+
+ambient_name = {ambient_name:?}
+assert_path = {assert_path:?}
+
+# In inherit mode with credentials: both ambient environment AND credentials must be present
+assert os.environ.get(ambient_name) == {ambient_val:?}, f"ambient env var {{ambient_name}} missing in inherit mode!"
+assert os.environ.get("INJECTED_INHERIT_CRED") == "cred_secret_val_789", f"injected credential missing in inherit mode!"
+
+with open(assert_path, 'w', encoding='utf-8') as f:
+    json.dump({{'verified': True}}, f)
+
+reply = {{'version': 1, 'run_id': run['id'], 'generation': run['generation'], 'executor_ref': executor_ref, 'status': 'started', 'logs': []}}
+print(json.dumps(reply))
+"#,
+                ambient_name = ambient_name,
+                ambient_val = ambient_val,
+                assert_path = assert_file.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        let hook = HookConfig::Script {
+            path: script,
+            interpreter: "python3".into(),
+            args: vec![],
+            cwd: None,
+            timeout_ms: 10_000,
+        };
+
+        let token_env = format!("SHIPBRAID_INHERIT_CRED_TOKEN_{}", Uuid::new_v4().simple());
+        let token_val = "inherit-cred-test-token-32-chars";
+        unsafe { std::env::set_var(&token_env, token_val) };
+
+        // Lane with credentials AND mode = inherit (or omitted hook_environment)
+        let config = Config {
+            mode: ConfigMode::Server,
+            database_path: temp.path().join("ledger.sqlite3"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["test-lane".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "test-lane".into(),
+                project: "test-project".into(),
+                environment: "dev".into(),
+                repository_id: "test-repo".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "p1".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                failure_observe: None,
+                resource_admission: None,
+                request_parameters: BTreeMap::new(),
+                enabled: true,
+                executor: LaneExecutorConfig::Hooks {
+                    dispatch: hook.clone(),
+                    observe: hook.clone(),
+                    verify: hook,
+                },
+                guide: None,
+                credentials: Some(crate::config::CredentialsConfig {
+                    env_files: vec![cred_file],
+                }),
+                hook_environment: Some(crate::config::HookEnvironmentConfig {
+                    mode: crate::config::HookEnvironmentMode::Inherit,
+                    allow: vec![],
+                }),
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+            artifacts_dir: None,
+            resource_roots: vec![],
+        };
+
+        let service = Service::open(config).await.unwrap();
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.runs[&run_id].state, RunState::Running);
+        assert!(
+            assert_file.is_file(),
+            "inherit hook assertion file was written"
+        );
+
+        unsafe {
+            std::env::remove_var(&ambient_name);
+            std::env::remove_var(&token_env);
+        }
+    }
+
+    #[tokio::test]
+    async fn isolated_hook_environment_with_command_hook_prevents_leak() {
+        let temp = tempfile::tempdir().unwrap();
+        let mirror = temp.path().join("source.git");
+        let output = std::process::Command::new("git")
+            .args(["init", "--bare", "--quiet"])
+            .arg(&mirror)
+            .output()
+            .unwrap();
+        assert!(output.status.success());
+
+        let marker_name = format!("SHIPBRAID_COMMAND_MARKER_{}", Uuid::new_v4().simple());
+        let marker_val = "marker_token_secret_cmd";
+        let unwhitelisted_name = format!("COMMAND_UNWHITELISTED_{}", Uuid::new_v4().simple());
+        let unwhitelisted_val = "unwhitelisted_cmd_ambient";
+        let whitelisted_name = format!("COMMAND_WHITELISTED_{}", Uuid::new_v4().simple());
+        let whitelisted_val = "whitelisted_cmd_value";
+
+        unsafe {
+            std::env::set_var(&marker_name, marker_val);
+            std::env::set_var(&unwhitelisted_name, unwhitelisted_val);
+            std::env::set_var(&whitelisted_name, whitelisted_val);
+        }
+
+        let cred_file = temp.path().join("cmd_creds.env");
+        std::fs::write(&cred_file, "COMMAND_INJECTED_CRED=cmd_cred_value_123\n").unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&cred_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        }
+
+        let assert_file = temp.path().join("cmd_hook_env_assertions.json");
+
+        let script = temp.path().join("command_hook.py");
+        std::fs::write(
+            &script,
+            format!(
+                r#"import datetime, json, os, sys, uuid
+request = json.load(sys.stdin)
+run = request['run']
+operation = request['operation']
+executor_ref = 'fixture:' + run['id']
+
+marker_name = {marker_name:?}
+unwhitelisted_name = {unwhitelisted_name:?}
+whitelisted_name = {whitelisted_name:?}
+assert_path = {assert_path:?}
+
+# Assertions for Command hook in isolated mode:
+assert marker_name not in os.environ, f"marker token {{marker_name}} leaked into isolated command hook!"
+assert unwhitelisted_name not in os.environ, f"unwhitelisted var {{unwhitelisted_name}} leaked into isolated command hook!"
+assert os.environ.get(whitelisted_name) == {whitelisted_val:?}, f"whitelisted var missing or wrong: {{os.environ.get(whitelisted_name)}}"
+assert os.environ.get("COMMAND_INJECTED_CRED") == "cmd_cred_value_123", f"injected credential missing or wrong"
+
+with open(assert_path, 'w', encoding='utf-8') as f:
+    json.dump({{'verified': True}}, f)
+
+reply = {{'version': 1, 'run_id': run['id'], 'generation': run['generation'], 'executor_ref': executor_ref, 'status': 'started', 'logs': []}}
+print(json.dumps(reply))
+"#,
+                marker_name = marker_name,
+                unwhitelisted_name = unwhitelisted_name,
+                whitelisted_name = whitelisted_name,
+                whitelisted_val = whitelisted_val,
+                assert_path = assert_file.display().to_string(),
+            ),
+        )
+        .unwrap();
+
+        // Use HookConfig::Command instead of Script
+        let hook = HookConfig::Command {
+            program: "python3".into(),
+            args: vec![script.to_str().unwrap().into()],
+            cwd: None,
+            timeout_ms: 10_000,
+        };
+
+        let token_env = format!("SHIPBRAID_COMMAND_TOKEN_{}", Uuid::new_v4().simple());
+        let token_val = "command-isolated-test-admin-token";
+        unsafe { std::env::set_var(&token_env, token_val) };
+
+        let config = Config {
+            mode: ConfigMode::Server,
+            database_path: temp.path().join("ledger.sqlite3"),
+            listen: "127.0.0.1:0".parse().unwrap(),
+            tokens: vec![TokenConfig {
+                id: "admin".into(),
+                token_env: token_env.clone(),
+                lanes: vec!["test-lane".into()],
+                projects: vec![],
+                urgent: true,
+                admin: true,
+                executor: false,
+            }],
+            lanes: vec![LaneConfig {
+                id: "test-lane".into(),
+                project: "test-project".into(),
+                environment: "dev".into(),
+                repository_id: "test-repo".into(),
+                repository_path: mirror,
+                release_ref: "refs/heads/main".into(),
+                profile_digest: "p1".into(),
+                components: vec!["app".into()],
+                allow_descendant: false,
+                allow_preemption: false,
+                failure_observe: None,
+                resource_admission: None,
+                request_parameters: BTreeMap::new(),
+                enabled: true,
+                executor: LaneExecutorConfig::Hooks {
+                    dispatch: hook.clone(),
+                    observe: hook.clone(),
+                    verify: hook,
+                },
+                guide: None,
+                credentials: Some(crate::config::CredentialsConfig {
+                    env_files: vec![cred_file],
+                }),
+                hook_environment: Some(crate::config::HookEnvironmentConfig {
+                    mode: crate::config::HookEnvironmentMode::Isolated,
+                    allow: vec![whitelisted_name.clone(), "PATH".into()],
+                }),
+            }],
+            max_active_runs: 1,
+            tick_ms: 1_000,
+            scripted_phase_ms: 60_000,
+            cancel_timeout_seconds: 30,
+            coalesce_ms: 0,
+            dashboard_dir: None,
+            artifacts_dir: None,
+            resource_roots: vec![],
+        };
+
+        let service = Service::open(config).await.unwrap();
+        let (run_id, _) = create_pending_dispatch(&service).await;
+        service.process_pending_commands().await.unwrap();
+
+        let snapshot = service.snapshot().await;
+        assert_eq!(snapshot.runs[&run_id].state, RunState::Running);
+        assert!(
+            assert_file.is_file(),
+            "command hook assertion file was written"
+        );
+
+        unsafe {
+            std::env::remove_var(&marker_name);
+            std::env::remove_var(&unwhitelisted_name);
+            std::env::remove_var(&whitelisted_name);
+            std::env::remove_var(&token_env);
+        }
     }
 }

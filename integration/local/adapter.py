@@ -48,6 +48,7 @@ SYSTEMD_SHOW_FIELDS = ("Id", "InvocationID", "LoadState", "ActiveState", "SubSta
 CONFIG_FIELDS = {
     "version", "lane_id", "project", "environment", "repository_id", "components",
     "state_dir", "cwd", "deploy", "verify", "environment_file", "verify_timeout_seconds",
+    "forward_env_prefixes",
 }
 ENV_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\Z")
 COMPONENT_NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z")
@@ -252,6 +253,10 @@ def load_config(path: Path) -> dict[str, Any]:
         raise AdapterError("configured working directory is not a directory")
     environment_file_value = config.get("environment_file")
     environment_file = None if environment_file_value in (None, "") else absolute_path(environment_file_value, "environment_file")
+    forward_env_prefixes_value = config.get("forward_env_prefixes", [])
+    if (not isinstance(forward_env_prefixes_value, list)
+            or any(not isinstance(prefix, str) or not prefix or "\x00" in prefix for prefix in forward_env_prefixes_value)):
+        raise AdapterError("configured forward_env_prefixes is invalid")
     verify_timeout = config.get("verify_timeout_seconds", 10)
     if isinstance(verify_timeout, bool) or not isinstance(verify_timeout, int) or not 1 <= verify_timeout <= 10:
         raise AdapterError("verify_timeout_seconds must be between 1 and 10")
@@ -270,8 +275,29 @@ def load_config(path: Path) -> dict[str, Any]:
         "verify": verify_argv,
         "environment_file": str(environment_file) if environment_file else None,
         "verify_timeout_seconds": verify_timeout,
+        "forward_env_prefixes": list(forward_env_prefixes_value),
     }
     return normalized
+
+
+def collect_forwarded_environment(prefixes: list[str]) -> dict[str, str]:
+    if not prefixes:
+        return {}
+    forwarded: dict[str, str] = {}
+    reserved = {"PATH", "HOME", "LANG", "LC_ALL", "INVOCATION_ID", "LISTEN_PID", "LISTEN_FDS",
+                "PYTHONPATH", "PYTHONHOME", "BASH_ENV", "ENV", "SHELLOPTS", "LD_PRELOAD", "LD_LIBRARY_PATH"}
+    allowed_demo_names = {"SHIPBRAID_DEMO_ROOT", "SHIPBRAID_DEMO_DELAY_SECONDS"}
+    for name in sorted(os.environ):
+        if not any(name.startswith(prefix) for prefix in prefixes):
+            continue
+        value = os.environ[name]
+        if (not ENV_NAME.fullmatch(name) or len(name) > 64 or name in reserved
+                or (name.startswith("SHIPBRAID_") and name not in allowed_demo_names)):
+            raise AdapterError(f"forwarded environment contains an invalid or reserved name: {name}")
+        if not value or len(value) > 8192 or "\x00" in value or "\n" in value or "\r" in value:
+            raise AdapterError(f"forwarded environment contains an invalid value for {name}")
+        forwarded[name] = value
+    return forwarded
 
 
 def configuration_digest(config: dict[str, Any], environment_digest: str) -> str:
@@ -664,16 +690,22 @@ def failure_reply(base: dict[str, Any], envelope: dict[str, Any], target: dict[s
             "message": "Task failed and systemd plus cgroup v2 confirmed it stopped; inspect the private deployment log"}
 
 
-def systemd_run(config_path: Path, request_path: Path, unit: str) -> None:
+def systemd_run(config_path: Path, request_path: Path, unit: str,
+                forward_env: dict[str, str] | None = None) -> None:
     command = [
         "systemd-run", "--user", "--quiet", "--no-block", "--unit", unit,
         "--property=Type=exec", "--property=RemainAfterExit=yes", "--property=Restart=no",
         "--property=KillMode=control-group", "--property=TimeoutStopSec=infinity",
         "--property=SendSIGKILL=no", "--property=UMask=0077",
         "--property=StandardOutput=null", "--property=StandardError=null",
+    ]
+    if forward_env:
+        for key, value in forward_env.items():
+            command.append(f"--setenv={key}={value}")
+    command.extend([
         sys.executable, str(Path(__file__).resolve()), "--config", str(config_path.resolve()),
         "--worker", str(request_path.resolve()),
-    ]
+    ])
     try:
         subprocess.run(command, check=True, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
                        stderr=subprocess.DEVNULL, timeout=12)
@@ -720,7 +752,9 @@ def dispatch(envelope: dict[str, Any], config: dict[str, Any], config_path: Path
             if state.get("LoadState") != "not-found":
                 return {**base, "status": "unknown", "message": "A unit already exists for this new dispatch intent; no command was sent"}
             try:
-                systemd_run(config_path, request_path, unit)
+                prefixes = config.get("forward_env_prefixes", [])
+                forwarded = collect_forwarded_environment(prefixes) if prefixes else None
+                systemd_run(config_path, request_path, unit, forwarded)
             except AdapterError:
                 return {**base, "status": "unknown", "message": "Dispatch intent is durable but systemd handoff response is uncertain; no replay will occur"}
             return {**base, "status": "started", "message": "Task was handed to an independent systemd user unit"}
@@ -747,6 +781,9 @@ def child_environment(config: dict[str, Any], environment_digest: str,
     env = {"PATH": "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
            "HOME": home, "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
     env.update(env_values)
+    prefixes = config.get("forward_env_prefixes", [])
+    if prefixes:
+        env.update(collect_forwarded_environment(prefixes))
     env.update({
         "SHIPBRAID_RUN_ID": str(run["id"]),
         "SHIPBRAID_GENERATION": str(run["generation"]),

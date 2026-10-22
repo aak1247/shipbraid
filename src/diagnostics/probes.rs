@@ -829,6 +829,8 @@ mod tests {
             failure_observe: None,
             resource_admission: None,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         }
     }
 

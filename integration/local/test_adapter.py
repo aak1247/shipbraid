@@ -576,6 +576,152 @@ class LocalAdapterTests(unittest.TestCase):
         self.assertEqual(len((demo_root / "deployment-starts").read_text().splitlines()), 1)
         self.assertTrue((demo_root / "app-artifact.json").is_file())
 
+    def test_forward_env_prefixes_merges_matching_variables_and_overlays_environment_file(self) -> None:
+        self.config_data["forward_env_prefixes"] = ["MYAPP_", "DEPLOY_"]
+        self.environment_file.write_text("MYAPP_KEY=from-file\nOTHER_KEY=keep-file\n", encoding="utf-8")
+        self.environment_file.chmod(0o600)
+        self.write_config()
+        config = adapter.load_config(self.config_path)
+        self.assertEqual(config["forward_env_prefixes"], ["MYAPP_", "DEPLOY_"])
+        _, environment_digest = adapter.read_environment_file(self.environment_file)
+        with patch.dict(os.environ, {
+            "MYAPP_KEY": "from-env",
+            "DEPLOY_VAR": "deploy-val",
+            "UNRELATED_VAR": "ignored-val",
+        }):
+            env = adapter.child_environment(config, environment_digest, self.envelope)
+        self.assertEqual(env["MYAPP_KEY"], "from-env")
+        self.assertEqual(env["DEPLOY_VAR"], "deploy-val")
+        self.assertEqual(env["OTHER_KEY"], "keep-file")
+        self.assertNotIn("UNRELATED_VAR", env)
+
+    def test_forward_env_prefixes_rejects_invalid_names_or_values(self) -> None:
+        self.config_data["forward_env_prefixes"] = ["MYAPP_", "SHIPBRAID_"]
+        self.write_config()
+        config = adapter.load_config(self.config_path)
+        _, environment_digest = adapter.read_environment_file(self.environment_file)
+
+        # Reserved prefix/key
+        with patch.dict(os.environ, {"MYAPP_BAD": "ok", "PATH": "/bin"}):
+            env = adapter.child_environment(config, environment_digest, self.envelope)
+            self.assertEqual(env["MYAPP_BAD"], "ok")
+
+        with patch.dict(os.environ, {"SHIPBRAID_COORDINATOR_TOKEN": "secret"}):
+            with self.assertRaises(adapter.AdapterError):
+                adapter.child_environment(config, environment_digest, self.envelope)
+
+        # Empty value
+        with patch.dict(os.environ, {"MYAPP_EMPTY": ""}):
+            with self.assertRaises(adapter.AdapterError):
+                adapter.child_environment(config, environment_digest, self.envelope)
+
+        # Newline in value
+        with patch.dict(os.environ, {"MYAPP_NEWLINE": "val\nbad"}):
+            with self.assertRaises(adapter.AdapterError):
+                adapter.child_environment(config, environment_digest, self.envelope)
+
+        # Value exceeds 8192 bytes
+        with patch.dict(os.environ, {"MYAPP_TOOLARGE": "a" * 8193}):
+            with self.assertRaises(adapter.AdapterError):
+                adapter.child_environment(config, environment_digest, self.envelope)
+
+    def test_dispatch_passes_forwarded_environment_to_systemd_run(self) -> None:
+        self.config_data["forward_env_prefixes"] = ["FORWARD_"]
+        self.write_config()
+        with patch.dict(os.environ, {"FORWARD_KEY": "forward-val", "OTHER": "skip"}), \
+                patch.object(adapter, "systemd_run") as mock_systemd_run:
+            reply = adapter.handle_hook(self.envelope, self.config_path)
+            self.assertEqual(reply["status"], "started")
+            mock_systemd_run.assert_called_once()
+            args = mock_systemd_run.call_args[0]
+            forwarded = args[3] if len(args) > 3 else mock_systemd_run.call_args[1].get("forward_env")
+            self.assertEqual(forwarded, {"FORWARD_KEY": "forward-val"})
+
+    def test_forward_env_prefixes_comprehensive_negative_matrix_and_boundaries(self) -> None:
+        # 1. Config loading validation: forward_env_prefixes format errors
+        for bad_prefixes in ["NOT_A_LIST", [123], [""], ["PREFIX\x00BAD"]]:
+            self.config_data["forward_env_prefixes"] = bad_prefixes
+            self.write_config()
+            with self.assertRaises(adapter.AdapterError) as ctx:
+                adapter.load_config(self.config_path)
+            self.assertIn("forward_env_prefixes is invalid", str(ctx.exception))
+
+        # 2. Config with MYAPP_ prefix for general validation
+        self.config_data["forward_env_prefixes"] = ["MYAPP_"]
+        self.write_config()
+        config = adapter.load_config(self.config_path)
+        _, environment_digest = adapter.read_environment_file(self.environment_file)
+
+        # Invalid env key names matching prefixes
+        invalid_keys = [
+            "MYAPP_HAS-HYPHEN",
+            "MYAPP_HAS.DOT",
+            "MYAPP_HAS SPACE",
+            "MYAPP_" + "A" * 60,  # 66 chars > 64 limit
+        ]
+        for bad_key in invalid_keys:
+            with patch.dict(os.environ, {bad_key: "valid_val"}):
+                with self.assertRaises(adapter.AdapterError) as ctx:
+                    adapter.child_environment(config, environment_digest, self.envelope)
+                self.assertIn("invalid or reserved name", str(ctx.exception))
+
+        # Boundary: key exactly 64 chars is accepted
+        exact_64_key = "MYAPP_" + "A" * 58  # exactly 64 chars
+        with patch.dict(os.environ, {exact_64_key: "valid_val"}):
+            env = adapter.child_environment(config, environment_digest, self.envelope)
+            self.assertEqual(env[exact_64_key], "valid_val")
+
+        # 3. Reserved environment variable names matching prefix
+        reserved_vars = ["PATH", "HOME", "LD_PRELOAD", "PYTHONPATH", "SHELLOPTS"]
+        for res_var in reserved_vars:
+            self.config_data["forward_env_prefixes"] = [res_var]
+            self.write_config()
+            cfg = adapter.load_config(self.config_path)
+            with patch.dict(os.environ, {res_var: "/usr/bin/custom"}):
+                with self.assertRaises(adapter.AdapterError) as ctx:
+                    adapter.child_environment(cfg, environment_digest, self.envelope)
+                self.assertIn("invalid or reserved name", str(ctx.exception))
+
+        # 4. Reserved SHIPBRAID_ prefix: secret tokens rejected, demo names allowed
+        self.config_data["forward_env_prefixes"] = ["SHIPBRAID_"]
+        self.write_config()
+        cfg_sb = adapter.load_config(self.config_path)
+        with patch.dict(os.environ, {"SHIPBRAID_SECRET_TOKEN": "forbidden"}):
+            with self.assertRaises(adapter.AdapterError) as ctx:
+                adapter.child_environment(cfg_sb, environment_digest, self.envelope)
+            self.assertIn("invalid or reserved name", str(ctx.exception))
+
+        # Clean demo environment without other SHIPBRAID_ ambient vars
+        demo_clean_env = {
+            k: v for k, v in os.environ.items()
+            if not k.startswith("SHIPBRAID_")
+        }
+        demo_clean_env["SHIPBRAID_DEMO_ROOT"] = "/tmp/demo"
+        demo_clean_env["SHIPBRAID_DEMO_DELAY_SECONDS"] = "2"
+        with patch.dict(os.environ, demo_clean_env, clear=True):
+            env = adapter.child_environment(cfg_sb, environment_digest, self.envelope)
+            self.assertEqual(env["SHIPBRAID_DEMO_ROOT"], "/tmp/demo")
+            self.assertEqual(env["SHIPBRAID_DEMO_DELAY_SECONDS"], "2")
+
+        # 5. Value boundaries and invalid characters (using MYAPP_ prefix)
+        # Exact 8192 bytes value is accepted
+        exact_8k_val = "v" * 8192
+        with patch.dict(os.environ, {"MYAPP_MAX_VAL": exact_8k_val}):
+            env = adapter.child_environment(config, environment_digest, self.envelope)
+            self.assertEqual(env["MYAPP_MAX_VAL"], exact_8k_val)
+
+        # Value with \r rejected
+        with patch.dict(os.environ, {"MYAPP_CR": "val\rwith_cr"}):
+            with self.assertRaises(adapter.AdapterError) as ctx:
+                adapter.child_environment(config, environment_digest, self.envelope)
+            self.assertIn("invalid value for MYAPP_CR", str(ctx.exception))
+
+        # Value with null byte rejected (mocking os.environ dictionary to simulate null byte in memory)
+        with patch.object(os, "environ", {"MYAPP_NULL": "val\x00with_null"}):
+            with self.assertRaises(adapter.AdapterError) as ctx:
+                adapter.child_environment(config, environment_digest, self.envelope)
+            self.assertIn("invalid value for MYAPP_NULL", str(ctx.exception))
+
 
 if __name__ == "__main__":
     unittest.main()

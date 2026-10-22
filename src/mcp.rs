@@ -1243,6 +1243,8 @@ mod tests {
                     environment: Some(dev_file),
                     components: comp_map,
                 }),
+                credentials: None,
+                hook_environment: None,
             },
             LaneConfig {
                 id: "lane-two".into(),
@@ -1261,6 +1263,8 @@ mod tests {
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
                 guide: None,
+                credentials: None,
+                hook_environment: None,
             },
         ];
 

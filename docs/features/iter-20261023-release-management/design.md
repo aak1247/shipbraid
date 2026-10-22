@@ -3,7 +3,7 @@
 ## 1. Document Control
 
 - Feature name：agent 发布管理三件套——自然语言发布指引（F2）、MCP 服务（F1）、凭据管理与 hook 环境注入（F3）。
-- Version：1，2026-10-23。
+- Version：1.1，2026-10-23。修订：§7.2 明确 inherit 模式下显式配置 credentials 时注入凭据（存量未配置 lane 零影响）；§7.3 明确空/默认配置不参与 digest。
 - Author：ZCode（产品与技术设计）；开发与测试由 gemini-3.8 承担，最终审核 ZCode。
 - Status：APPROVED（本轮范围如 §4；不构成生产接入授权）。
 - Linked execution plan：[execution-plan.md](execution-plan.md)。
@@ -172,14 +172,14 @@ env 文件格式（与本机适配器 environment_file 一致）：`KEY=value` �
 
 `HookExecutor::call` 对 `command`/`script` 两类 hook（dispatch/observe/verify 及 failure_observe 全部生效）：
 
-- `mode = "inherit"`（默认）：行为与现状逐字节一致（继续继承服务进程环境）——存量 lane 零影响。
+- `mode = "inherit"`（默认）：继续继承服务进程环境。存量 lane（未配置 `credentials`）行为与升级前完全一致；管理员显式配置了 `[lanes.credentials]` 时，在继承环境之上追加注入凭据（渐进采用路径，doctor 会对 inherit 模式给出风险提示）。
 - `mode = "isolated"`：`Command::env_clear()` 后，先从协调器进程复制 `allow` 白名单中实际存在的变量，再注入凭据键值。webhook 传输不变（沿用 `token_env`）。
 
 秘密只存在于子进程环境；不进入 JSON 信封、argv、日志、回执与数据库。本机适配器新增可选配置 `forward_env_prefixes: []`（默认空）：适配器把自身进程环境中匹配前缀的变量（受同样的键名/大小规则约束）并入 systemd worker 环境，与既有 `environment_file` 叠加；协调器侧 isolated 注入 + 适配器转发即可让部署脚本拿到凭据，全程不经信封。
 
 ### 7.3 profile 指纹绑定与轮换
 
-`effective_profile_digest` 追加两项输入（序列化方式与 request_parameters 一致）：
+`effective_profile_digest` 追加两项输入（序列化方式与 request_parameters 一致，即**空/默认配置不参与哈希**，保证存量 lane 指纹与升级前逐字节一致）：
 
 1. `hook_environment` 的规范化序列化（mode、排序后的 allow）；
 2. 凭据文件集：每个文件的路径 + 内容 SHA-256（按路径排序）。

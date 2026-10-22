@@ -2132,6 +2132,8 @@ mod tests {
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         };
         let service = Service::open(Config {
             database_path: temp.path().join("ledger.db"),
@@ -2778,6 +2780,8 @@ mod tests {
             enabled: true,
             executor: LaneExecutorConfig::Scripted,
             guide: None,
+            credentials: None,
+            hook_environment: None,
         };
         let config = Config {
             database_path: temp.path().join("state.db"),
@@ -2979,6 +2983,8 @@ mod tests {
                 enabled: true,
                 executor: LaneExecutorConfig::Scripted,
                 guide: None,
+                credentials: None,
+                hook_environment: None,
             }],
             artifacts_dir: Some(artifacts_path),
             ..Config::default()
@@ -3204,6 +3210,8 @@ mod tests {
                             ("worker".into(), worker_comp_file.clone()),
                         ]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 LaneConfig {
                     id: "myapp-dev-canary".into(),
@@ -3226,6 +3234,8 @@ mod tests {
                         environment: Some(dev_env_file.clone()),
                         components: BTreeMap::from([("app".into(), app_comp_file.clone())]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 LaneConfig {
                     id: "myapp-prod".into(),
@@ -3248,6 +3258,8 @@ mod tests {
                         environment: Some(prod_env_file.clone()),
                         components: BTreeMap::from([("app".into(), app_comp_file.clone())]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 LaneConfig {
                     id: "other-lane".into(),
@@ -3266,6 +3278,8 @@ mod tests {
                     enabled: true,
                     executor: LaneExecutorConfig::Scripted,
                     guide: None,
+                    credentials: None,
+                    hook_environment: None,
                 },
             ],
             ..Config::default()
@@ -3482,6 +3496,8 @@ mod tests {
                     environment: None,
                     components: BTreeMap::new(),
                 }),
+                credentials: None,
+                hook_environment: None,
             }],
             ..Config::default()
         };
@@ -3581,6 +3597,8 @@ mod tests {
                             ("zeta".into(), zeta_file.clone()),
                         ]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 // 2. Partial guide: only environment and beta
                 LaneConfig {
@@ -3604,6 +3622,8 @@ mod tests {
                         environment: Some(env_file.clone()),
                         components: BTreeMap::from([("beta".into(), beta_file.clone())]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 // 3. Partial guide: only project
                 LaneConfig {
@@ -3627,6 +3647,8 @@ mod tests {
                         environment: None,
                         components: BTreeMap::new(),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
             ],
             ..Config::default()
@@ -3820,6 +3842,8 @@ mod tests {
                         environment: None,
                         components: BTreeMap::new(),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 LaneConfig {
                     id: "other-lane".into(),
@@ -3838,6 +3862,8 @@ mod tests {
                     enabled: true,
                     executor: LaneExecutorConfig::Scripted,
                     guide: None,
+                    credentials: None,
+                    hook_environment: None,
                 },
             ],
             ..Config::default()
@@ -4032,6 +4058,8 @@ mod tests {
                             ("api".into(), api_comp_file.clone()),
                         ]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 // Lane 2: dev env, web only, sharing dev_env_file and web_comp_file, NO project overview
                 LaneConfig {
@@ -4055,6 +4083,8 @@ mod tests {
                         environment: Some(dev_env_file.clone()),
                         components: BTreeMap::from([("web".into(), web_comp_file.clone())]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
                 // Lane 3: staging env, api & worker, sharing api_comp_file with dev, NO project overview
                 LaneConfig {
@@ -4081,6 +4111,8 @@ mod tests {
                             ("worker".into(), worker_comp_file.clone()),
                         ]),
                     }),
+                    credentials: None,
+                    hook_environment: None,
                 },
             ],
             ..Config::default()
